@@ -16,6 +16,7 @@ Source6:        https://files.pythonhosted.org/packages/b5/74/a87aafa40ec3a37089
 Source7:        https://files.pythonhosted.org/packages/39/5b/99ee4dd6080d857f029ad209860d461305f5fba9fef2316548a1d131e4c2/rpcudp-5.0.1.tar.gz
 
 BuildRequires:  cmake >= 3.5.0
+BuildRequires:  python3-sphinx
 BuildRequires:  python3-devel
 BuildRequires:  python3-pip
 BuildRequires:  python3-wheel
