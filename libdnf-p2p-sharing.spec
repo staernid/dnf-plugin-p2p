@@ -27,6 +27,9 @@ BuildArch:      noarch
 Requires:       python3-libdnf5
 Requires:       python3-%{name}-common = %{version}-%{release}
 Requires:       %{name}-proxy = %{version}-%{release}
+Provides:       dnf-plugin-p2p = %{version}-%{release}
+Provides:       dnf5-plugin-p2p = %{version}-%{release}
+Provides:       python3-dnf5-plugin-p2p = %{version}-%{release}
 
 %description -n python3-libdnf5-plugin-p2p-sharing
 This package contains the P2P package sharing plugin for libdnf5.
