@@ -1,4 +1,4 @@
-# libdnf-p2p-sharing
+# dnf-plugin-p2p
 
 A libdnf5 plugin for peer-to-peer package sharing over local networks.
 
