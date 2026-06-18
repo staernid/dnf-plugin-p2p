@@ -14,6 +14,7 @@ Source4:        https://files.pythonhosted.org/packages/5e/26/ef24db0fbfec080b72
 Source5:        https://files.pythonhosted.org/packages/96/8e/68c2bd0346247570e8e01e8c170a0237884e95cdfa43989527b71adaa978/py_cid-0.5.0.tar.gz
 Source6:        https://files.pythonhosted.org/packages/b5/74/a87aafa40ec3a37089148b859892cbe2eef08d132c816d58a60459be5337/trio-typing-0.10.0.tar.gz
 Source7:        https://files.pythonhosted.org/packages/39/5b/99ee4dd6080d857f029ad209860d461305f5fba9fef2316548a1d131e4c2/rpcudp-5.0.1.tar.gz
+Source8:        https://files.pythonhosted.org/packages/98/b7/3d6a5eb9f1788da09371ee1be08768b72fdcd956cee0f3f92a8ef1819862/libp2p-0.6.0.tar.gz
 
 BuildRequires:  cmake >= 3.5.0
 BuildRequires:  python3-sphinx
@@ -79,18 +80,13 @@ This package contains the local P2P proxy server daemon.
 %cmake
 %cmake_build
 
-# Build the local libp2p dependency as a wheel first
-mkdir -p bundled-deps
-python3 -m pip wheel --no-deps --no-build-isolation -w bundled-deps/ ./py-libp2p-src/
-
 %install
 %cmake_install
 
 # Install bundled python dependencies directly into the libexec plugin folder
-# This pulls the pre-downloaded PyPI tarballs from %{_sourcedir} and the local libp2p wheel
+# This pulls the pre-downloaded PyPI tarballs from %{_sourcedir}
 python3 -m pip install \
     --no-index \
-    --find-links=bundled-deps/ \
     --find-links=%{_sourcedir} \
     --target=%{buildroot}%{_libexecdir}/libdnf-p2p-sharing \
     --no-build-isolation \
