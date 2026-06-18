@@ -1,0 +1,32 @@
+# Build directories
+build/
+_build/
+dist/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+egg-info/
+*.egg
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+.directory
+*.bak
+
+# Documentation
+doc/_build/
+
+# Cache
+.p2p_index
+*.cache
