@@ -9,8 +9,8 @@ srpm:
 	mkdir -p build/SOURCES build/SPECS build/$(NAME)-$(VERSION)
 	cp $(spec) build/SPECS/
 	
-	# Archive tracked git files into the build directory
-	git archive --format=tar HEAD | tar -x -C build/$(NAME)-$(VERSION)
+	# Copy files to the build directory, excluding Git and build directories
+	tar --exclude='./.git' --exclude='./.copr' --exclude='./build' --exclude='./test_outdir' --exclude='./test_install_dir' --exclude='./test_wheels' -cf - . | tar -x -C build/$(NAME)-$(VERSION)
 	
 	# Download PyPI dependencies into bundled-deps
 	mkdir -p build/$(NAME)-$(VERSION)/bundled-deps
