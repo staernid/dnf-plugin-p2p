@@ -10,15 +10,13 @@ srpm:
 	cp $(spec) build/SPECS/
 	
 	# Copy files to the build directory, excluding Git and build directories
-	tar --exclude='./.git' --exclude='./.copr' --exclude='./build' --exclude='./test_outdir' --exclude='./test_install_dir' --exclude='./test_wheels' -cf - . | tar -x -C build/$(NAME)-$(VERSION)
+	tar --exclude='.git' --exclude='.copr' --exclude='build' --exclude='test_outdir' --exclude='test_install_dir' --exclude='test_wheels' -cf - . | tar -x -C build/$(NAME)-$(VERSION)
 	
-	# Download PyPI dependencies into bundled-deps
-	mkdir -p build/$(NAME)-$(VERSION)/bundled-deps
-	pip download --no-deps --no-binary :all: --dest build/$(NAME)-$(VERSION)/bundled-deps/ \
-		fastecdsa py-multibase py-multihash py-multicodec py-cid trio-typing rpcudp
-	
-	# Build the local libp2p package as a wheel into bundled-deps
-	pip wheel --no-deps -w build/$(NAME)-$(VERSION)/bundled-deps/ ./py-libp2p-src/
+	# Download the external Source URLs listed in the spec file into build/SOURCES
+	# so that rpmbuild can find them and package them into the SRPM
+	for url in $$(grep -E '^Source[1-9][0-9]*:' build/SPECS/$(notdir $(spec)) | awk '{print $$2}'); do \
+		curl -s -L -o build/SOURCES/$$(basename "$$url") "$$url"; \
+	done
 	
 	# Create final tarball containing everything
 	tar -czf build/SOURCES/$(NAME)-$(VERSION).tar.gz -C build $(NAME)-$(VERSION)

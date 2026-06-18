@@ -7,6 +7,13 @@ Summary:        Peer-to-peer package sharing plugin for libdnf5
 License:        GPL-2.0-or-later
 URL:            https://github.com/staernid/libdnf-p2p-sharing
 Source0:        %{url}/archive/v%{version}/%{name}-%{version}.tar.gz
+Source1:        https://files.pythonhosted.org/packages/fc/21/d5585856169c595d99a596dd8000afae40053f9f5c955d8ec8fb2ec3247c/fastecdsa-2.3.2.tar.gz
+Source2:        https://files.pythonhosted.org/packages/bc/52/5ed393ab49df7e3b03995d3c4e53bae1e8c2ca40909cf25a41b346c09a38/py_multibase-2.0.0.tar.gz
+Source3:        https://files.pythonhosted.org/packages/11/3d/ed68b0eccd0654f7f3c163d9b3d428f903e5e3e884ab1f0d0a16ba6a4f11/py_multihash-3.0.0.tar.gz
+Source4:        https://files.pythonhosted.org/packages/5e/26/ef24db0fbfec080b72c5ac4a1000da3a4d696a1e31862c695d683097a1b5/py_multicodec-1.0.0.tar.gz
+Source5:        https://files.pythonhosted.org/packages/96/8e/68c2bd0346247570e8e01e8c170a0237884e95cdfa43989527b71adaa978/py_cid-0.5.0.tar.gz
+Source6:        https://files.pythonhosted.org/packages/b5/74/a87aafa40ec3a37089148b859892cbe2eef08d132c816d58a60459be5337/trio-typing-0.10.0.tar.gz
+Source7:        https://files.pythonhosted.org/packages/39/5b/99ee4dd6080d857f029ad209860d461305f5fba9fef2316548a1d131e4c2/rpcudp-5.0.1.tar.gz
 
 BuildRequires:  cmake >= 3.5.0
 BuildRequires:  python3-devel
@@ -71,13 +78,19 @@ This package contains the local P2P proxy server daemon.
 %cmake
 %cmake_build
 
+# Build the local libp2p dependency as a wheel first
+mkdir -p bundled-deps
+python3 -m pip wheel --no-deps --no-build-isolation -w bundled-deps/ ./py-libp2p-src/
+
 %install
 %cmake_install
 
 # Install bundled python dependencies directly into the libexec plugin folder
+# This pulls the pre-downloaded PyPI tarballs from %{_sourcedir} and the local libp2p wheel
 python3 -m pip install \
     --no-index \
     --find-links=bundled-deps/ \
+    --find-links=%{_sourcedir} \
     --target=%{buildroot}%{_libexecdir}/libdnf-p2p-sharing \
     --no-build-isolation \
     --no-deps \
