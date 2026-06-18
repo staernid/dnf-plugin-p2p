@@ -31,8 +31,8 @@ Quick Start
 
 2. Enable it in configuration::
 
-    sudo nano /etc/dnf/libdnf-plugins/p2p-plugin.conf
-    # Set: enabled = true
+    sudo nano /etc/dnf/libdnf5-plugins/python_plugins_loader.d/p2p_plugin.conf
+    # Set: enabled = 1
 
 3. Run DNF normally::
 

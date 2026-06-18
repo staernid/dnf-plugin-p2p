@@ -4,38 +4,41 @@ A libdnf5 plugin for peer-to-peer package sharing over local networks.
 
 ## Overview
 
-`libdnf-p2p-sharing` enables DNF 5 / libdnf5 to discover and download RPM packages from peers on the local network using multicast queries, reducing bandwidth consumption and improving package download performance in environments with multiple systems.
+`libdnf-p2p-sharing` enables DNF 5 / libdnf5 to discover and download RPM packages from peers on the local network using a standardized libp2p mDNS discovery network, reducing bandwidth consumption and improving package download performance in environments with multiple systems.
 
 ## Architecture
 
 The plugin consists of two main components:
 
-### 1. libdnf5 Plugin (`libdnf5-plugins/p2p_plugin.py`)
+### 1. libdnf5 Plugin (`plugins/p2p_plugin.py`)
 
-- Hooks into the libdnf5 plugin system
-- Discovers P2P peers via multicast on the local network
-- Manages the local HTTP proxy server
-- Intercepts package downloads and routes them through the local P2P proxy
+- Hooks into the libdnf5 plugin system.
+- Intercepts repository configurations at the `repos_configured` stage (before metadata downloads start).
+- Automatically routes all repository downloads and metadata requests through the local P2P proxy.
 
 ### 2. P2P Proxy Server (`p2p-proxy-server/`)
 
-- Local HTTP/FTP proxy daemon running on each system
-- Handles incoming requests for packages
-- Queries local cache for available files
-- Falls back to remote mirrors if packages are not available locally
-- Serves packages to other peers on the network
+- A multi-threaded local HTTP proxy daemon (`p2p_server.py`) running on each system.
+- Handles incoming package requests and transparently tunnels HTTPS connections using the HTTP `CONNECT` method.
+- Coordinates checks against the local cache, queries local peers over the libp2p network, and falls back to upstream mirrors when necessary.
+- Features automatic URL resolution to proxy absolute URLs without explicit query parameters.
 
 ## How It Works
 
-1. **Plugin Initialization**: The libdnf5 plugin starts the local P2P proxy server on startup
-2. **Peer Discovery**: Uses multicast (224.0.0.1:5353) to query for peers with cached packages
-3. **Download Interception**: Modifies repository base URLs to route through the local proxy
-4. **Proxy Operation**: For each package request:
-   - Checks if available locally (in cache)
-   - Queries discovered peers for the package
-   - Downloads from fastest available peer
-   - Falls back to remote repository if needed
-   - Caches the package locally for future peer requests
+1. **Plugin Initialization**: The libdnf5 plugin checks and starts the local P2P proxy server daemon on startup. It performs a lightweight `/ping` health check to verify the proxy is active and authentic before routing traffic, automatically bypassing the proxy for safety if the service is unavailable or if another service conflicts with the port.
+2. **Peer Discovery**: Uses `py-libp2p` with mDNS for automatic zero-configuration local peer discovery.
+3. **Download Interception**: Modifies repository configurations early to route traffic through the local proxy.
+4. **Proxy Operation**:
+   - **HTTPS Connections**: Transparently tunneled to the original mirror via the `CONNECT` protocol.
+   - **HTTP Package Requests (.rpm, .drpm)**:
+     - Checks if the file is available in the local cache.
+     - Queries discovered peers via the libp2p Request-Response protocol (`/dnf-p2p/query/1.0.0`).
+     - Downloads and streams the package from the fastest available peer.
+     - Falls back to upstream remote repository mirrors if unavailable on the P2P network.
+     - Caches the downloaded package locally to share with other peers.
+   - **HTTP Metadata and Non-Package Requests**:
+     - Streamed directly from the upstream remote repository mirror without local caching or peer querying, ensuring repository metadata remains fresh and preventing transaction signature mismatches.
+
 
 ## Installation
 
@@ -46,12 +49,14 @@ make
 sudo make install
 ```
 
+
 ## Configuration
 
-Edit `/etc/dnf/libdnf-plugins/p2p-plugin.conf`:
+Edit `/etc/dnf/libdnf5-plugins/python_plugins_loader.d/p2p_plugin.conf`:
 
 ```ini
 [main]
+name = p2p_plugin
 enabled = 1
 
 [p2p]
@@ -75,7 +80,10 @@ peer_discovery_timeout = 2
 max_parallel_peers = 5
 ```
 
+*Note: The local proxy service manages peer discovery over libp2p. Under the hood, the proxy's `py-libp2p` node performs mDNS discovery automatically to locate nearby nodes and execute secure JSON package queries. HTTPS connections are tunneled securely (without MITM decryption) to maintain TLS integrity, meaning only HTTP repository traffic is cached and shared via P2P.*
+
 ## Usage
+
 
 Once installed and configured, the plugin operates transparently. No special commands are required:
 

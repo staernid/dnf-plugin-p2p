@@ -26,7 +26,7 @@ from pathlib import Path
 logger = logging.getLogger(__name__)
 
 
-class P2PSharingPlugin(libdnf5.plugin.IPlugin2_1):
+class Plugin(libdnf5.plugin.IPlugin):
     """
     libdnf5 plugin for peer-to-peer package sharing over local networks.
     
@@ -37,6 +37,7 @@ class P2PSharingPlugin(libdnf5.plugin.IPlugin2_1):
 
     def __init__(self, data):
         super().__init__(data)
+        print(">>> P2P PLUG-IN INSTANTIATED <<<", file=sys.stderr)
         self.base = self.get_base()
         self.proxy_process = None
         self.proxy_port = 8888
@@ -82,22 +83,28 @@ class P2PSharingPlugin(libdnf5.plugin.IPlugin2_1):
 
     def init(self):
         """Plugin initialization - load configuration and start proxy server."""
+        print(">>> P2P PLUG-IN INITIALIZED <<<", file=sys.stderr)
         logger.info("P2P Sharing Plugin: Initializing")
         
         # Load configuration
         self._load_config()
         
         if not self.enabled:
+            print(">>> P2P PLUG-IN DISABLED (check config) <<<", file=sys.stderr)
             logger.info("P2P Sharing Plugin: Disabled in configuration")
             return
         
         # Start the local proxy server
+        print(">>> P2P PLUG-IN STARTING PROXY SERVER <<<", file=sys.stderr)
         self._start_proxy_server()
         logger.info(f"P2P Sharing Plugin: Proxy server started on {self.proxy_host}:{self.proxy_port}")
 
     def _load_config(self):
-        """Load plugin configuration from /etc/dnf/libdnf-plugins/p2p-plugin.conf."""
+        """Load plugin configuration from /etc/dnf/libdnf5-plugins/python_plugins_loader.d/p2p_plugin.conf."""
         config_paths = [
+            Path("/etc/dnf/libdnf5-plugins/python_plugins_loader.d/p2p_plugin.conf"),
+            Path("/etc/dnf/libdnf5-plugins/p2p-plugin.conf"),
+            Path("/etc/dnf/libdnf5-plugins/p2p_plugin.conf"),
             Path("/etc/dnf/libdnf-plugins/p2p-plugin.conf"),
             Path("/etc/dnf/plugins/p2p-plugin.conf"),  # Fallback
         ]
@@ -135,103 +142,88 @@ class P2PSharingPlugin(libdnf5.plugin.IPlugin2_1):
             logger.warning(f"P2P Sharing Plugin: Failed to load configuration: {e}")
 
     def _start_proxy_server(self):
-        """Start the local P2P proxy server process."""
+        """Ensure the P2P proxy systemd service is active."""
+        import socket
         try:
-            # Get the directory where this plugin is installed
-            plugin_dir = Path(__file__).parent.parent
-            proxy_script = plugin_dir / "p2p-proxy-server" / "p2p_server.py"
-            
-            # Fallback to system-wide installation
-            if not proxy_script.exists():
-                proxy_script = Path("/usr/libexec/libdnf-p2p-sharing/p2p_server.py")
-            
-            if not proxy_script.exists():
-                logger.warning(f"P2P Sharing Plugin: Proxy server script not found at {proxy_script}")
+            # Check if proxy is already active and listening
+            with socket.create_connection((self.proxy_host, self.proxy_port), timeout=0.1):
+                print(">>> P2P PROXY ALREADY ACTIVE <<<", file=sys.stderr)
+                logger.info("P2P Sharing Plugin: proxy is already active")
                 return
-            
-            self.proxy_process = subprocess.Popen(
-                [
-                    sys.executable,
-                    str(proxy_script),
-                    f"--port={self.proxy_port}",
-                    f"--host={self.proxy_host}",
-                    f"--multicast-group={self.multicast_group}",
-                    f"--multicast-port={self.multicast_port}",
-                ],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                start_new_session=True  # Run in separate session so it survives plugin shutdown
+        except (ConnectionRefusedError, socket.timeout, OSError):
+            pass
+
+        try:
+            result = subprocess.run(
+                ["systemctl", "start", "dnf-p2p-proxy.service"],
+                capture_output=True, text=True, timeout=10
             )
-            logger.debug(f"P2P Sharing Plugin: Proxy server process started (PID: {self.proxy_process.pid})")
+            if result.returncode == 0:
+                print(">>> P2P PROXY SERVICE STARTED <<<", file=sys.stderr)
+                logger.info("P2P Sharing Plugin: dnf-p2p-proxy.service started")
+            else:
+                logger.info(
+                    f"P2P Sharing Plugin: systemctl start failed (perhaps run as non-root) "
+                    f"(rc={result.returncode}): {result.stderr.strip()}"
+                )
+        except FileNotFoundError:
+            logger.error("P2P Sharing Plugin: systemctl not found — is systemd running?")
+        except subprocess.TimeoutExpired:
+            logger.error("P2P Sharing Plugin: systemctl start timed out")
         except Exception as e:
-            logger.error(f"P2P Sharing Plugin: Failed to start proxy server: {e}")
+            logger.error(f"P2P Sharing Plugin: Failed to start proxy service: {e}")
 
-    def repos_loaded(self):
-        """Hook called after repositories are loaded.
+    def repos_configured(self):
+        """Hook called after repositories are configured but before loading metadata.
         
-        Modifies repository base URLs to route through the local P2P proxy.
+        Modifies repository configurations to route downloads through our local P2P proxy.
         """
+        print(">>> P2P PLUG-IN REPOS CONFIGURED <<<", file=sys.stderr)
         if not self.enabled:
-            return
+            return True
         
+        # Check if local proxy is active and responding to identity/health checks
+        import socket
+        proxy_active = False
         try:
-            logger.debug("P2P Sharing Plugin: repos_loaded hook called")
-            
-            # Discover peers on the local network
-            peers = self._discover_peers()
-            logger.debug(f"P2P Sharing Plugin: Discovered {len(peers)} peers")
-            
-            if peers or self.cache_enabled:
-                # Inject local proxy as the primary download source
-                self._inject_proxy_into_repos()
-        except Exception as e:
-            logger.error(f"P2P Sharing Plugin: Error in repos_loaded hook: {e}")
+            with socket.create_connection((self.proxy_host, self.proxy_port), timeout=0.2) as sock:
+                sock.settimeout(0.2)
+                sock.sendall(b"GET /ping HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n")
+                response = sock.recv(1024)
+                if b"HTTP/1.1 200" in response and b"pong" in response:
+                    proxy_active = True
+        except Exception:
+            pass
 
-    def _discover_peers(self):
-        """Query the local network for P2P peers using multicast.
-        
-        Returns:
-            list: List of peer addresses (IP:port tuples)
-        """
-        # This will be implemented in p2p_peer_discovery.py
-        # For now, return an empty list
-        return []
+        if not proxy_active:
+            print(">>> P2P PROXY NOT ACTIVE OR CONFLICTING SERVICE: BYPASSING <<<", file=sys.stderr)
+            logger.warning("P2P Sharing Plugin: Local proxy is not active or responding. Bypassing P2P proxy for safety.")
+            return True
 
-    def _inject_proxy_into_repos(self):
-        """Modify repository base URLs to use the local P2P proxy."""
+
         try:
-            # Note: Direct manipulation of repo baseurls in libdnf5 may require
-            # using the appropriate libdnf5 API. This is a placeholder for the logic.
-            logger.debug("P2P Sharing Plugin: Injecting proxy into repository configurations")
+            logger.info("P2P Sharing Plugin: Configuring repository proxy settings")
+            query = libdnf5.repo.RepoQuery(self.base)
+            query.filter_enabled(True)
             
-            # TODO: Implement repo URL modification using libdnf5 API
-            # This will likely involve iterating through available repos and
-            # prepending the proxy URL or using mirror manipulation
+            proxy_url = f"http://{self.proxy_host}:{self.proxy_port}"
+            for repo in query:
+                # Only proxy remote repositories
+                if not repo.is_local():
+                    config = repo.get_config()
+                    config.proxy = proxy_url
+                    print(f">>> Proxied repo {repo.get_id()} through {proxy_url} <<<", file=sys.stderr)
+                    logger.debug(f"P2P Sharing Plugin: Proxied repo {repo.get_id()} through {proxy_url}")
         except Exception as e:
-            logger.error(f"P2P Sharing Plugin: Failed to inject proxy into repos: {e}")
+            logger.error(f"P2P Sharing Plugin: Error in repos_configured hook: {e}")
+        return True
+
 
     def goal_resolved(self, transaction):
-        """Hook called when a goal is resolved.
-        
-        Args:
-            transaction: The transaction that was resolved.
-        """
-        if not self.enabled:
-            return
-        
-        logger.debug("P2P Sharing Plugin: goal_resolved hook called")
+        """Hook called when a goal is resolved."""
+        pass
 
     def finish(self):
-        """Plugin cleanup - stop the proxy server."""
-        logger.info("P2P Sharing Plugin: Finishing")
-        
-        if self.proxy_process:
-            try:
-                self.proxy_process.terminate()
-                self.proxy_process.wait(timeout=5)
-                logger.debug("P2P Sharing Plugin: Proxy server terminated gracefully")
-            except subprocess.TimeoutExpired:
-                self.proxy_process.kill()
-                logger.warning("P2P Sharing Plugin: Proxy server killed forcefully")
-            except Exception as e:
-                logger.error(f"P2P Sharing Plugin: Error stopping proxy server: {e}")
+        """Plugin cleanup — proxy daemon is intentionally left running across DNF5 invocations."""
+        logger.debug("P2P Sharing Plugin: Finish hook called (proxy daemon continues running)")
+

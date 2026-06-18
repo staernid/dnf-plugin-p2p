@@ -1,1 +1,1 @@
-ADD_SUBDIRECTORY (libdnf-plugins)
+ADD_SUBDIRECTORY (libdnf5-plugins)

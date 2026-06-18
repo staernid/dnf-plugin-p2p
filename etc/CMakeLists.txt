@@ -1,0 +1,2 @@
+ADD_SUBDIRECTORY (dnf)
+ADD_SUBDIRECTORY (profile.d)

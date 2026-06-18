@@ -13,3 +13,9 @@ extensions = [
 
 html_theme = 'alabaster'
 master_doc = 'index'
+
+man_pages = [
+    (master_doc, 'libdnf-p2p-sharing', 'libdnf-p2p-sharing Documentation',
+     [author], 8)
+]
+

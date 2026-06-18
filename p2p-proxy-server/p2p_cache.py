@@ -7,6 +7,7 @@
 
 import logging
 import hashlib
+import threading
 from pathlib import Path
 from typing import Optional, Dict, List
 import os
@@ -26,6 +27,7 @@ class P2PCache:
         self.cache_dir = Path(cache_dir)
         self.cache_dir.mkdir(parents=True, exist_ok=True)
         self.index = {}  # {hash: cache_entry}
+        self.lock = threading.RLock()
         self._load_cache_index()
 
     def _load_cache_index(self) -> None:
@@ -34,20 +36,23 @@ class P2PCache:
             index_file = self.cache_dir / ".p2p_index"
             if index_file.exists():
                 import json
-                with open(index_file, 'r') as f:
-                    self.index = json.load(f)
+                with self.lock:
+                    with open(index_file, 'r') as f:
+                        self.index = json.load(f)
                 logger.debug(f"Loaded cache index with {len(self.index)} entries")
         except Exception as e:
             logger.warning(f"Failed to load cache index: {e}")
-            self.index = {}
+            with self.lock:
+                self.index = {}
 
     def _save_cache_index(self) -> None:
         """Save the cache index to disk."""
         try:
             import json
             index_file = self.cache_dir / ".p2p_index"
-            with open(index_file, 'w') as f:
-                json.dump(self.index, f, indent=2)
+            with self.lock:
+                with open(index_file, 'w') as f:
+                    json.dump(self.index, f, indent=2)
         except Exception as e:
             logger.warning(f"Failed to save cache index: {e}")
 
@@ -101,12 +106,13 @@ class P2PCache:
                 logger.debug(f"Added to cache: {cache_file}")
             
             # Update index
-            self.index[package_hash] = {
-                "filename": file_path.name,
-                "size": file_path.stat().st_size,
-                **package_info
-            }
-            self._save_cache_index()
+            with self.lock:
+                self.index[package_hash] = {
+                    "filename": file_path.name,
+                    "size": file_path.stat().st_size,
+                    **package_info
+                }
+                self._save_cache_index()
             return True
         except Exception as e:
             logger.error(f"Failed to add file to cache: {e}")
@@ -121,16 +127,45 @@ class P2PCache:
         Returns:
             Path to the cached file, or None if not found
         """
-        if package_hash in self.index:
-            filename = self.index[package_hash].get("filename")
-            if filename:
-                cache_file = self.cache_dir / filename
-                if cache_file.exists():
-                    return cache_file
-                else:
-                    logger.warning(f"Cached file no longer exists: {cache_file}")
-                    del self.index[package_hash]
-                    self._save_cache_index()
+        with self.lock:
+            if package_hash in self.index:
+                filename = self.index[package_hash].get("filename")
+                if filename:
+                    cache_file = self.cache_dir / filename
+                    if cache_file.exists():
+                        return cache_file
+                    else:
+                        logger.warning(f"Cached file no longer exists: {cache_file}")
+                        del self.index[package_hash]
+                        self._save_cache_index()
+        return None
+
+    def lookup_filename(self, filename: str) -> Optional[Dict]:
+        """Look up a package in the cache by its filename.
+        
+        Args:
+            filename: Name of the package file
+            
+        Returns:
+            Dict containing 'hash' and 'size' if found, else None
+        """
+        with self.lock:
+            for package_hash, info in list(self.index.items()):
+                if info.get("filename") == filename:
+                    cache_file = self.cache_dir / filename
+                    if cache_file.exists():
+                        return {
+                            "hash": package_hash,
+                            "size": info.get("size", 0)
+                        }
+                    else:
+                        logger.warning(f"Cached file no longer exists: {cache_file}")
+                        try:
+                            del self.index[package_hash]
+                            self._save_cache_index()
+                        except KeyError:
+                            pass
+                        break
         return None
 
     def list_cached_files(self) -> List[Dict]:
@@ -139,13 +174,15 @@ class P2PCache:
         Returns:
             List of cache entries with metadata
         """
-        entries = []
-        for hash_val, info in self.index.items():
-            cache_file = self.cache_dir / info["filename"]
-            if cache_file.exists():
-                entries.append({
-                    "hash": hash_val,
-                    "path": str(cache_file),
-                    **info
-                })
-        return entries
+        with self.lock:
+            entries = []
+            for hash_val, info in self.index.items():
+                cache_file = self.cache_dir / info["filename"]
+                if cache_file.exists():
+                    entries.append({
+                        "hash": hash_val,
+                        "path": str(cache_file),
+                        **info
+                    })
+            return entries
+

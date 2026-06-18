@@ -1,0 +1,31 @@
+[Unit]
+Description=DNF P2P Package Sharing Proxy
+Documentation=https://github.com/staernid/dnf-plugin-p2p
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /usr/libexec/libdnf-p2p-sharing/p2p_server.py \
+    --host=127.0.0.1 \
+    --port=8888 \
+    --cache-dir=/var/cache/libdnf-p2p-sharing
+
+# Automatically restart if it crashes; not on clean exit
+Restart=on-failure
+RestartSec=5s
+
+# Logging goes to journald — use: journalctl -u dnf-p2p-proxy.service
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=dnf-p2p-proxy
+
+# Security hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=read-only
+PrivateTmp=true
+CacheDirectory=libdnf-p2p-sharing
+ReadWritePaths=/var/cache/libdnf5 /var/cache/libdnf-p2p-sharing /tmp
+
+[Install]
+WantedBy=multi-user.target
