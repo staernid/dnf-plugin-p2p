@@ -39,11 +39,13 @@ def test_http_handler_cache_hit(test_server):
     
     # Mock cache file exists
     temp_file = Path("/tmp/mock_cache_dir/test-package.rpm")
+    mock_cache.get_cached_file_by_name.return_value = temp_file
     
     # Patch Path.exists to return True for the cache file and mock size
+    from unittest.mock import mock_open
     with patch.object(Path, "exists", return_value=True), \
          patch.object(Path, "stat") as mock_stat, \
-         patch("builtins.open", patch("io.BytesIO", return_value=b"mock-rpm-bytes")):
+         patch("builtins.open", mock_open(read_data=b"mock-rpm-bytes")):
         
         mock_stat.return_value.st_size = 14
         
@@ -54,9 +56,11 @@ def test_http_handler_cache_hit(test_server):
         assert response.getcode() == 200
         assert response.headers.get("Content-Type") == "application/x-redhat-package-manager"
         assert response.headers.get("Content-Length") == "14"
+        assert response.read() == b"mock-rpm-bytes"
 
 def test_http_handler_peer_fallback(test_server):
     server, port, mock_cache, mock_node = test_server
+    mock_cache.get_cached_file_by_name.return_value = None
     
     # Package does not exist locally
     mock_node.query_peers_for_package.return_value = [

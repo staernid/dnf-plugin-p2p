@@ -44,10 +44,10 @@ max_parallel_peers = 5
 
 ---
 
-### 4. No Cache Eviction or Size Limits
+### 4. [DONE] No Cache Eviction or Size Limits
 The cache manager (`p2p_cache.py`) handles writing files to `/var/cache/dnf-plugin-p2p/`, but it lacks any mechanism to prune them.
-* **The Problem:** There is no maximum cache size limit, total disk space percentage check, or LRU (Least Recently Used) eviction policy.
-* **The Result:** The cache directory will grow indefinitely until the host machine runs out of disk space.
+* The Problem: There is no maximum cache size limit, total disk space percentage check, or LRU (Least Recently Used) eviction policy.
+* The Result: The cache directory will grow indefinitely until the host machine runs out of disk space.
 
 ---
 

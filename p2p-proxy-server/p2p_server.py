@@ -136,8 +136,8 @@ class P2PProxyHandler(BaseHTTPRequestHandler):
                 return
 
             # 1. Check if package is in local cache
-            cache_file = self.cache.cache_dir / filename
-            if cache_file.exists():
+            cache_file = self.cache.get_cached_file_by_name(filename)
+            if cache_file:
                 logger.info(f"Serving {filename} from local cache")
                 self._serve_file(cache_file)
                 return
@@ -193,8 +193,8 @@ class P2PProxyHandler(BaseHTTPRequestHandler):
 
         # Check local cache (only if it is a package file)
         if filename.endswith((".rpm", ".drpm")):
-            cache_file = self.cache.cache_dir / filename
-            if cache_file.exists():
+            cache_file = self.cache.get_cached_file_by_name(filename)
+            if cache_file:
                 self.send_response(200)
                 self.send_header("Content-Type", "application/x-redhat-package-manager")
                 self.send_header("Content-Length", str(cache_file.stat().st_size))
@@ -417,6 +417,8 @@ def main():
     DEFAULT_PEER_DISCOVERY_TIMEOUT = 2.0
     DEFAULT_MAX_PARALLEL_PEERS = 5
     DEFAULT_DEBUG = False
+    DEFAULT_MAX_CACHE_SIZE_MB = 1024
+    DEFAULT_MAX_DISK_USAGE_PERCENT = 90.0
 
     parser = argparse.ArgumentParser(
         description="P2P HTTP proxy server for DNF package sharing"
@@ -466,6 +468,18 @@ def main():
         default=None,
         help="Enable debug logging"
     )
+    parser.add_argument(
+        "--max-cache-size-mb",
+        type=int,
+        default=None,
+        help=f"Maximum cache size in MB (default: {DEFAULT_MAX_CACHE_SIZE_MB})"
+    )
+    parser.add_argument(
+        "--max-disk-usage-percent",
+        type=float,
+        default=None,
+        help=f"Maximum disk usage percentage (default: {DEFAULT_MAX_DISK_USAGE_PERCENT})"
+    )
     
     args = parser.parse_args()
 
@@ -512,6 +526,16 @@ def main():
                             config_values["debug"] = config.getboolean("p2p", "debug")
                         except ValueError:
                             pass
+                    if config.has_option("p2p", "max_cache_size_mb"):
+                        try:
+                            config_values["max_cache_size_mb"] = config.getint("p2p", "max_cache_size_mb")
+                        except ValueError:
+                            pass
+                    if config.has_option("p2p", "max_disk_usage_percent"):
+                        try:
+                            config_values["max_disk_usage_percent"] = config.getfloat("p2p", "max_disk_usage_percent")
+                        except ValueError:
+                            pass
                 break
             except Exception as e:
                 # Can't use logger yet because logging isn't set up
@@ -525,12 +549,14 @@ def main():
     debug = args.debug if args.debug is not None else config_values.get("debug", DEFAULT_DEBUG)
     peer_discovery_timeout = args.peer_discovery_timeout if args.peer_discovery_timeout is not None else config_values.get("peer_discovery_timeout", DEFAULT_PEER_DISCOVERY_TIMEOUT)
     max_parallel_peers = args.max_parallel_peers if args.max_parallel_peers is not None else config_values.get("max_parallel_peers", DEFAULT_MAX_PARALLEL_PEERS)
+    max_cache_size_mb = args.max_cache_size_mb if args.max_cache_size_mb is not None else config_values.get("max_cache_size_mb", DEFAULT_MAX_CACHE_SIZE_MB)
+    max_disk_usage_percent = args.max_disk_usage_percent if args.max_disk_usage_percent is not None else config_values.get("max_disk_usage_percent", DEFAULT_MAX_DISK_USAGE_PERCENT)
 
     setup_logging(debug=debug)
     
     # Initialize cache
     cache_path = Path(cache_dir).expanduser()
-    cache = P2PCache(cache_path)
+    cache = P2PCache(cache_path, max_cache_size_mb=max_cache_size_mb, max_disk_usage_percent=max_disk_usage_percent)
     
     # Start libp2p node
     logger.info("Initializing libp2p node...")
