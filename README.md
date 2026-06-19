@@ -4,7 +4,7 @@ A libdnf5 plugin for peer-to-peer package sharing over local networks.
 
 ## Overview
 
-`libdnf-p2p-sharing` enables DNF 5 / libdnf5 to discover and download RPM packages from peers on the local network using a standardized libp2p mDNS discovery network, reducing bandwidth consumption and improving package download performance in environments with multiple systems.
+`dnf-plugin-p2p` enables DNF 5 / libdnf5 to discover and download RPM packages from peers on the local network using a standardized libp2p mDNS discovery network, reducing bandwidth consumption and improving package download performance in environments with multiple systems.
 
 ## Architecture
 
@@ -42,11 +42,42 @@ The plugin consists of two main components:
 
 ## Installation
 
+### From Copr (Fedora)
+
+Pre-built RPM packages are available in the official Copr repository:
+
+```bash
+# Enable the Copr repository
+sudo dnf copr enable staernid/libdnf-p2p-sharing
+
+# Install the packages
+sudo dnf install -y dnf-plugin-p2p dnf-plugin-p2p-proxy python3-dnf-plugin-p2p-common
+```
+
+### From Source
+
+To compile and install the plugin from source:
+
 ```bash
 mkdir build && cd build
 cmake ..
 make
 sudo make install
+```
+
+## Service Management
+
+The P2P proxy server runs as a systemd service. After installation, enable and start the daemon:
+
+```bash
+# Enable and start the service
+sudo systemctl enable --now dnf-p2p-proxy.service
+
+# Check service status
+systemctl status dnf-p2p-proxy.service
+
+# View real-time service logs
+journalctl -u dnf-p2p-proxy.service -f
 ```
 
 
