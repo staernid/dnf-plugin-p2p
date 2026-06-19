@@ -15,7 +15,7 @@ Source4:        https://files.pythonhosted.org/packages/5e/26/ef24db0fbfec080b72
 Source5:        https://files.pythonhosted.org/packages/96/8e/68c2bd0346247570e8e01e8c170a0237884e95cdfa43989527b71adaa978/py_cid-0.5.0.tar.gz
 Source6:        https://files.pythonhosted.org/packages/b5/74/a87aafa40ec3a37089148b859892cbe2eef08d132c816d58a60459be5337/trio-typing-0.10.0.tar.gz
 Source7:        https://files.pythonhosted.org/packages/39/5b/99ee4dd6080d857f029ad209860d461305f5fba9fef2316548a1d131e4c2/rpcudp-5.0.1.tar.gz
-Source8:        https://github.com/libp2p/py-libp2p/archive/e11ec4c12513f56d0d750fb97171d0e408ec2284/libp2p-0.6.0.tar.gz
+Source8:        https://github.com/libp2p/py-libp2p/archive/e11ec4c173028af04637dc499de6521b6704253f/libp2p-0.6.0.tar.gz
 Source9:        https://files.pythonhosted.org/packages/source/p/pycryptodome/pycryptodome-3.20.0.tar.gz
 
 BuildRequires:  cmake >= 3.5.0
