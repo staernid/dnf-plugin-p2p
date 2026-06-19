@@ -105,6 +105,19 @@ class Plugin(libdnf5.plugin.IPlugin):
         self._start_proxy_server()
         logger.info(f"P2P Sharing Plugin: Proxy server started on {self.proxy_host}:{self.proxy_port}")
 
+    def pre_base_setup(self):
+        """Hook called before base setup. Disable zchunk so metadata downloads
+        use plain .xml.gz instead of .xml.zck, which requires multi-range HTTP
+        requests that the P2P proxy cannot relay correctly."""
+        if not self.enabled:
+            return
+        try:
+            config = self.base.get_config()
+            config.zchunk = False
+            logger.debug("P2P Sharing Plugin: Disabled zchunk for proxy compatibility")
+        except Exception as e:
+            logger.error(f"P2P Sharing Plugin: Failed to disable zchunk: {e}")
+
     def _load_config(self):
         """Load plugin configuration from /etc/dnf/libdnf5-plugins/python_plugins_loader.d/p2p_plugin.conf."""
         config_paths = [
@@ -219,6 +232,21 @@ class Plugin(libdnf5.plugin.IPlugin):
                 if not repo.is_local():
                     config = repo.get_config()
                     config.proxy = proxy_url
+                    
+                    # Rewrite metalink/mirrorlist/baseurl in-memory to HTTP so DNF5 sends GET requests to localhost proxy.
+                    if config.metalink and config.metalink.startswith("https://"):
+                        config.metalink = config.metalink.replace("https://", "http://", 1)
+                    if config.mirrorlist and config.mirrorlist.startswith("https://"):
+                        config.mirrorlist = config.mirrorlist.replace("https://", "http://", 1)
+                    if config.baseurl:
+                        new_baseurls = []
+                        for url in config.baseurl:
+                            if url.startswith("https://"):
+                                new_baseurls.append(url.replace("https://", "http://", 1))
+                            else:
+                                new_baseurls.append(url)
+                        config.baseurl = tuple(new_baseurls)
+                    
                     self._print(f">>> Proxied repo {repo.get_id()} through {proxy_url} <<<")
                     logger.debug(f"P2P Sharing Plugin: Proxied repo {repo.get_id()} through {proxy_url}")
         except Exception as e:

@@ -119,6 +119,12 @@ class P2PProxyHandler(BaseHTTPRequestHandler):
             if not remote_url and (self.path.startswith("http://") or self.path.startswith("https://")):
                 remote_url = self.path
 
+            # Automatically upgrade HTTP mirror URLs to HTTPS to secure internet traffic
+            if remote_url and remote_url.startswith("http://"):
+                parsed_remote = urllib.parse.urlparse(remote_url)
+                if parsed_remote.hostname not in ("127.0.0.1", "localhost"):
+                    remote_url = remote_url.replace("http://", "https://", 1)
+
             # Only cache and peer-query package files (.rpm, .drpm).
             # Metadata and other non-package files are streamed directly.
             if not filename.endswith((".rpm", ".drpm")):
@@ -179,6 +185,12 @@ class P2PProxyHandler(BaseHTTPRequestHandler):
         if not remote_url and (self.path.startswith("http://") or self.path.startswith("https://")):
             remote_url = self.path
 
+        # Automatically upgrade HTTP mirror URLs to HTTPS to secure internet traffic
+        if remote_url and remote_url.startswith("http://"):
+            parsed_remote = urllib.parse.urlparse(remote_url)
+            if parsed_remote.hostname not in ("127.0.0.1", "localhost"):
+                remote_url = remote_url.replace("http://", "https://", 1)
+
         # Check local cache (only if it is a package file)
         if filename.endswith((".rpm", ".drpm")):
             cache_file = self.cache.cache_dir / filename
@@ -222,14 +234,64 @@ class P2PProxyHandler(BaseHTTPRequestHandler):
         except Exception as e:
             logger.error(f"Error serving file: {e}")
 
+    @staticmethod
+    def _rewrite_metalink_urls(content: bytes) -> bytes:
+        """Rewrite only <url> element text in metalink XML from https:// to http://.
+
+        Uses a regex that targets only the URL text inside <url ...>...</url>
+        elements, leaving checksums and all other content untouched.
+        """
+        import re
+        # Match <url ...>https://...</url> and rewrite only the URL text
+        def _rewrite_url_element(match):
+            prefix = match.group(1)
+            url_text = match.group(2)
+            suffix = match.group(3)
+            rewritten = url_text.replace(b"https://", b"http://")
+            return prefix + rewritten + suffix
+
+        # Regex: capture <url ...> prefix, URL text, and </url> suffix
+        pattern = rb'(<url[^>]*>)(https://[^<]+)(</url>)'
+        return re.sub(pattern, _rewrite_url_element, content)
+
     def _stream_remote(self, url: str) -> bool:
         """Stream a file from a remote URL to the client without caching it."""
         try:
-            response = requests.get(url, stream=True, timeout=15)
+            # Check if this is a metalink/mirrorlist that needs URL rewriting
+            is_metalink = "metalink" in url or "mirrorlist" in url
+            
+            # Forward key headers from the client (Range for zchunk, etc.)
+            forwarded_headers = {}
+            for hdr in ("Range", "If-Range", "If-None-Match", "If-Modified-Since"):
+                val = self.headers.get(hdr)
+                if val:
+                    forwarded_headers[hdr] = val
+            
+            response = requests.get(url, stream=not is_metalink, timeout=15,
+                                    headers=forwarded_headers if forwarded_headers else None)
+            
+            if is_metalink:
+                # Rewrite mirror URLs from HTTPS to HTTP so DNF sends GETs through proxy
+                content = response.content
+                modified_content = self._rewrite_metalink_urls(content)
+                try:
+                    self.send_response(response.status_code)
+                    for header, value in response.headers.items():
+                        if header.lower() == "content-length":
+                            self.send_header(header, str(len(modified_content)))
+                        elif header.lower() in ["content-type", "last-modified", "etag"]:
+                            self.send_header(header, value)
+                    self.end_headers()
+                    self.wfile.write(modified_content)
+                except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError) as e:
+                    raise ClientDisconnected() from e
+                return True
+
             try:
                 self.send_response(response.status_code)
                 for header, value in response.headers.items():
-                    if header.lower() in ["content-type", "content-length", "last-modified", "etag"]:
+                    if header.lower() in ["content-type", "content-length", "content-range",
+                                          "last-modified", "etag", "accept-ranges"]:
                         self.send_header(header, value)
                 self.end_headers()
             except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError) as e:
