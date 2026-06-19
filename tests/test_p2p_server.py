@@ -70,21 +70,20 @@ def test_http_handler_peer_fallback(test_server):
     # Mock requests.get to return a successful download from peer
     mock_response = MagicMock()
     mock_response.status_code = 200
-    mock_response.headers = {"Content-Length": "100"}
+    mock_response.headers = {"Content-Length": "12"}
     mock_response.iter_content.return_value = [b"chunk1", b"chunk2"]
     
+    from unittest.mock import mock_open
     with patch.object(Path, "exists", return_value=False), \
+         patch.object(Path, "rename") as mock_rename, \
          patch("requests.get", return_value=mock_response) as mock_get, \
-         patch("builtins.open", MagicMock()):
+         patch("builtins.open", mock_open()):
         
         # Trigger download from peer
         url = f"http://127.0.0.1:{port}/packages/test-package.rpm"
-        try:
-            # We catch exception since mock open and final rename might raise issues,
-            # but we can verify that requests.get was called with the peer URL
-            urllib.request.urlopen(url, timeout=1)
-        except Exception:
-            pass
+        response = urllib.request.urlopen(url, timeout=1)
+        assert response.getcode() == 200
+        assert response.read() == b"chunk1chunk2"
             
         # Assert that it queried the libp2p node and tried to download from the peer
         mock_node.query_peers_for_package.assert_called_with("test-package.rpm")
@@ -176,17 +175,19 @@ def test_http_handler_force_https_enabled(test_server):
     # Mock requests.get to return a successful response
     mock_response = MagicMock()
     mock_response.status_code = 200
-    mock_response.headers = {"Content-Length": "100"}
+    mock_response.headers = {"Content-Length": "6"}
     mock_response.iter_content.return_value = [b"chunk1"]
     
-    with patch("requests.get", return_value=mock_response) as mock_get, \
-         patch("builtins.open", MagicMock()):
+    from unittest.mock import mock_open
+    with patch.object(Path, "exists", return_value=False), \
+         patch.object(Path, "rename") as mock_rename, \
+         patch("requests.get", return_value=mock_response) as mock_get, \
+         patch("builtins.open", mock_open()):
         
         url = f"http://127.0.0.1:{port}/packages/test-package.rpm?remote_url=http://mirror.foo.com/packages/test-package.rpm"
-        try:
-            urllib.request.urlopen(url, timeout=1)
-        except Exception:
-            pass
+        response = urllib.request.urlopen(url, timeout=1)
+        assert response.getcode() == 200
+        assert response.read() == b"chunk1"
             
         # Assert that requests.get was called with the upgraded HTTPS url
         mock_get.assert_any_call("https://mirror.foo.com/packages/test-package.rpm", stream=True, timeout=15)
@@ -202,18 +203,21 @@ def test_http_handler_force_https_disabled(test_server):
     # Mock requests.get to return a successful response
     mock_response = MagicMock()
     mock_response.status_code = 200
-    mock_response.headers = {"Content-Length": "100"}
+    mock_response.headers = {"Content-Length": "6"}
     mock_response.iter_content.return_value = [b"chunk1"]
     
-    with patch("requests.get", return_value=mock_response) as mock_get, \
-         patch("builtins.open", MagicMock()):
+    from unittest.mock import mock_open
+    with patch.object(Path, "exists", return_value=False), \
+         patch.object(Path, "rename") as mock_rename, \
+         patch("requests.get", return_value=mock_response) as mock_get, \
+         patch("builtins.open", mock_open()):
         
         url = f"http://127.0.0.1:{port}/packages/test-package.rpm?remote_url=http://mirror.foo.com/packages/test-package.rpm"
-        try:
-            urllib.request.urlopen(url, timeout=1)
-        except Exception:
-            pass
+        response = urllib.request.urlopen(url, timeout=1)
+        assert response.getcode() == 200
+        assert response.read() == b"chunk1"
             
         # Assert that requests.get was called with the original HTTP url
         mock_get.assert_any_call("http://mirror.foo.com/packages/test-package.rpm", stream=True, timeout=15)
+
 
