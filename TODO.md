@@ -77,7 +77,7 @@ if remote_url and remote_url.startswith("http://"):
 
 ---
 
-### 8. Hardcoded Python Version in Shell/Environment Files
+### 8. [DONE] Hardcoded Python Version in Shell/Environment Files
 * **The issue:** Both `/etc/profile.d/libdnf-python-plugin.sh` and `/etc/environment.d/libdnf-python-plugin.conf` hardcode the Python path:
   ```bash
   export LIBDNF_PYTHON_PLUGIN_DIR=/usr/lib/python3.14/site-packages/libdnf_plugins
@@ -87,7 +87,7 @@ if remote_url and remote_url.startswith("http://"):
 
 ---
 
-### 9. Broken Test Mocking (Silent Test Failures)
+### 9. [DONE] Broken Test Mocking (Silent Test Failures)
 * **The issue:** In `tests/test_p2p_server.py` (`test_http_handler_cache_hit`), the mock for `builtins.open` is nested incorrectly:
   ```python
   patch("builtins.open", patch("io.BytesIO", return_value=b"mock-rpm-bytes"))
