@@ -175,6 +175,18 @@ class Plugin(libdnf5.plugin.IPlugin):
         except (ConnectionRefusedError, socket.timeout, OSError):
             pass
 
+        import os
+        try:
+            is_root = os.geteuid() == 0
+        except AttributeError:
+            # Fallback for systems/environments where geteuid is not available
+            is_root = False
+
+        if not is_root:
+            self._print(">>> P2P PROXY NOT ACTIVE (skipping start because run as non-root) <<<")
+            logger.info("P2P Sharing Plugin: Proxy not active and skipping auto-start because run as non-root")
+            return
+
         try:
             result = subprocess.run(
                 ["systemctl", "start", "dnf-p2p-proxy.service"],

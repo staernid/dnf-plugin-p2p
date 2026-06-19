@@ -67,13 +67,13 @@ if remote_url and remote_url.startswith("http://"):
 
 ---
 
-### 7. Polkit Authorization Block on Non-Root DNF Commands
+### 7. [DONE] Polkit Authorization Block on Non-Root DNF Commands
 * **The issue:** Non-root users frequently run read-only DNF commands (e.g. `dnf search`, `dnf list`, `dnf info`). During plugin initialization (`plugins/p2p_plugin.py`), the plugin runs:
   ```python
   subprocess.run(["systemctl", "start", "dnf-p2p-proxy.service"])
   ```
 * **The problem:** Running `systemctl start` as a non-root user triggers a Polkit prompt asking for the root/admin password in the console. For simple queries that shouldn't require root permissions, this blocks the terminal and disrupts the user experience.
-* **The fix:** The plugin should check `os.geteuid() == 0` first and only attempt to start the systemd service if running as root.
+* **The fix:** The plugin should not try to start the service itself. The systemd service should potentially be enabled by default and/or started by the user. Not sure what the convention would be for a fedora package that is install and forget or if that even exists there. Think about it and do what you think is best.
 
 ---
 
