@@ -23,23 +23,6 @@ The plugin consists of two main components:
 - Coordinates checks against the local cache, queries local peers over the libp2p network, and falls back to upstream mirrors when necessary.
 - Features automatic URL resolution to proxy absolute URLs without explicit query parameters.
 
-## How It Works
-
-1. **Plugin Initialization**: The libdnf5 plugin checks and starts the local P2P proxy server daemon on startup. It performs a lightweight `/ping` health check to verify the proxy is active and authentic before routing traffic, automatically bypassing the proxy for safety if the service is unavailable or if another service conflicts with the port.
-2. **Peer Discovery**: Uses `py-libp2p` with mDNS for automatic zero-configuration local peer discovery.
-3. **Download Interception**: Modifies repository configurations early to route traffic through the local proxy.
-4. **Proxy Operation**:
-   - **HTTPS Connections**: Transparently tunneled to the original mirror via the `CONNECT` protocol.
-   - **HTTP Package Requests (.rpm, .drpm)**:
-     - Checks if the file is available in the local cache.
-     - Queries discovered peers via the libp2p Request-Response protocol (`/dnf-p2p/query/1.0.0`).
-     - Downloads and streams the package from the fastest available peer.
-     - Falls back to upstream remote repository mirrors if unavailable on the P2P network.
-     - Caches the downloaded package locally to share with other peers.
-   - **HTTP Metadata and Non-Package Requests**:
-     - Streamed directly from the upstream remote repository mirror without local caching or peer querying, ensuring repository metadata remains fresh and preventing transaction signature mismatches.
-
-
 ## Installation
 
 ### From Copr (Fedora)
@@ -50,8 +33,8 @@ Pre-built RPM packages are available in the official Copr repository:
 # Enable the Copr repository
 sudo dnf copr enable staernid/libdnf-p2p-sharing
 
-# Install the packages
-sudo dnf install -y dnf-plugin-p2p dnf-plugin-p2p-proxy python3-dnf-plugin-p2p-common
+# Install
+sudo dnf install -y dnf-plugin-p2p
 ```
 
 ### From Source
