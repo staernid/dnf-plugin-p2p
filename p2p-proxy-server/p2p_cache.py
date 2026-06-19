@@ -76,13 +76,13 @@ class P2PCache:
             logger.error(f"Failed to calculate hash for {file_path}: {e}")
             return None
 
-    def add_to_cache(self, file_path: Path, package_hash: str, package_info: Dict) -> bool:
+    def add_to_cache(self, file_path: Path, package_hash: Optional[str] = None, package_info: Optional[Dict] = None) -> bool:
         """Add a package file to the cache.
         
         Args:
             file_path: Path to the package file
-            package_hash: Hash of the package (for verification)
-            package_info: Dictionary with package metadata
+            package_hash: Hash of the package (optional, for verification)
+            package_info: Dictionary with package metadata (optional)
         
         Returns:
             True if successful, False otherwise
@@ -92,9 +92,12 @@ class P2PCache:
                 logger.error(f"File not found: {file_path}")
                 return False
             
-            # Verify the hash
+            # Calculate and verify the hash
             file_hash = self.get_file_hash(file_path)
-            if file_hash != package_hash:
+            if file_hash is None:
+                return False
+            
+            if package_hash is not None and file_hash != package_hash:
                 logger.warning(f"Hash mismatch for {file_path}: {file_hash} != {package_hash}")
                 return False
             
@@ -107,10 +110,10 @@ class P2PCache:
             
             # Update index
             with self.lock:
-                self.index[package_hash] = {
+                self.index[file_hash] = {
                     "filename": file_path.name,
                     "size": file_path.stat().st_size,
-                    **package_info
+                    **(package_info or {})
                 }
                 self._save_cache_index()
             return True

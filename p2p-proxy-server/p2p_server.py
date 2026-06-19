@@ -350,8 +350,7 @@ class P2PProxyHandler(BaseHTTPRequestHandler):
                 try:
                     temp_file.rename(final_file)
                     # Add to cache index
-                    file_hash = self.cache.get_file_hash(final_file)
-                    self.cache.add_to_cache(final_file, file_hash, {"source": url})
+                    self.cache.add_to_cache(final_file, None, {"source": url})
                     logger.info(f"Successfully cached {filename}")
                 except Exception as e:
                     logger.error(f"Failed to register {filename} in cache: {e}")
