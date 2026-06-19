@@ -1,0 +1,99 @@
+name: CI/CD Pipeline
+
+on:
+  push:
+    branches: [ master ]
+    tags: [ 'v*' ]
+  pull_request:
+    branches: [ master ]
+
+jobs:
+  test:
+    name: Run Python Tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+
+      - name: Install System Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgmp-dev
+
+      - name: Install Python Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install pytest trio requests base58 coincurve fastecdsa py-multibase py-multihash py-multicodec py-cid trio-typing rpcudp pycryptodome anyio aioquic noiseprotocol protobuf pynacl zeroconf trio-websocket morphys lru-dict
+
+      - name: Run Pytest
+        run: pytest tests/
+
+  build-srpm:
+    name: Build Fedora SRPM (Packaging Check)
+    runs-on: ubuntu-latest
+    container:
+      image: fedora:40
+    steps:
+      - name: Install Git and Build Tools
+        run: dnf install -y git-core make rpm-build tar curl findutils
+
+      - name: Checkout Code
+        uses: actions/checkout@v4
+        with:
+          safe-directory: '*'
+
+      - name: Dry-run SRPM Build
+        run: |
+          mkdir -p build/out
+          make -f .copr/Makefile srpm spec=dnf-plugin-p2p.spec outdir=build/out
+
+      - name: Upload SRPM Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: srpm
+          path: build/out/*.src.rpm
+
+  release:
+    name: Create GitHub Release
+    needs: [test, build-srpm]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Get Version from Tag
+        id: get_version
+        run: echo "VERSION=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
+
+      - name: Download Build SRPM Artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: srpm
+          path: dist-srpm
+
+      - name: Create Source Tarball
+        run: |
+          # Package the repo sources in the same structure as COPR/rpmbuild expects
+          VERSION=${{ steps.get_version.outputs.VERSION }}
+          mkdir -p build/release/dnf-plugin-p2p-${VERSION}
+          tar --exclude='.git' --exclude='.github' --exclude='build' --exclude='.copr' -cf - . | tar -x -C build/release/dnf-plugin-p2p-${VERSION}
+          tar -czf dnf-plugin-p2p-${VERSION}.tar.gz -C build/release dnf-plugin-p2p-${VERSION}
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dnf-plugin-p2p-${{ steps.get_version.outputs.VERSION }}.tar.gz
+            dist-srpm/*.src.rpm
+          draft: false
+          prerelease: false
+          generate_release_notes: true

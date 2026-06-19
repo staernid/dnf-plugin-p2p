@@ -3,8 +3,8 @@
 project = 'libdnf-p2p-sharing'
 copyright = '2024, libdnf-p2p-sharing contributors'
 author = 'libdnf-p2p-sharing contributors'
-version = '0.1'
-release = '0.1.0'
+version = '0.2'
+release = '0.2.0'
 
 extensions = [
     'sphinx.ext.autodoc',
