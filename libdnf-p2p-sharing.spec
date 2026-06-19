@@ -69,6 +69,14 @@ Requires:       python3-zeroconf
 Requires:       python3-trio-websocket
 Requires:       python3-morphys
 Requires:       python3-lru-dict
+Provides:       bundled(python3dist(fastecdsa)) = 2.3.2
+Provides:       bundled(python3dist(py-multibase)) = 2.0.0
+Provides:       bundled(python3dist(py-multihash)) = 3.0.0
+Provides:       bundled(python3dist(py-multicodec)) = 1.0.0
+Provides:       bundled(python3dist(py-cid)) = 0.5.0
+Provides:       bundled(python3dist(trio-typing)) = 0.10.0
+Provides:       bundled(python3dist(rpcudp)) = 5.0.1
+Provides:       bundled(python3dist(libp2p)) = 0.6.0
 
 %description proxy
 This package contains the local P2P proxy server daemon.
