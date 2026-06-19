@@ -119,17 +119,23 @@ def test_main_config_loading_and_override():
              "proxy_port": "9999",
              "peer_discovery_timeout": "4.5",
              "max_parallel_peers": "12",
-             "debug": "true"
+             "debug": "true",
+             "max_cache_size_mb": "512",
+             "max_disk_usage_percent": "80.0",
+             "force_https": "false"
          }[opt]), \
          patch("configparser.ConfigParser.getint", side_effect=lambda sec, opt: {
              "proxy_port": 9999,
-             "max_parallel_peers": 12
+             "max_parallel_peers": 12,
+             "max_cache_size_mb": 512
          }[opt]), \
          patch("configparser.ConfigParser.getfloat", side_effect=lambda sec, opt: {
-             "peer_discovery_timeout": 4.5
+             "peer_discovery_timeout": 4.5,
+             "max_disk_usage_percent": 80.0
          }[opt]), \
          patch("configparser.ConfigParser.getboolean", side_effect=lambda sec, opt: {
-             "debug": True
+             "debug": True,
+             "force_https": False
          }[opt]), \
          patch("p2p_server.P2PLibp2pNode", return_value=mock_node_instance) as mock_node_cls, \
          patch("p2p_server.P2PCache") as mock_cache_cls, \
@@ -155,4 +161,59 @@ def test_main_config_loading_and_override():
             ("127.0.0.9", 9999),
             mock_server_cls.call_args[0][1] # P2PProxyHandler
         )
+
+        # Assert force_https setting was set on P2PProxyHandler class
+        assert P2PProxyHandler.force_https is False
+
+
+def test_http_handler_force_https_enabled(test_server):
+    server, port, mock_cache, mock_node = test_server
+    mock_cache.get_cached_file_by_name.return_value = None
+    mock_node.query_peers_for_package.return_value = []
+    
+    P2PProxyHandler.force_https = True
+    
+    # Mock requests.get to return a successful response
+    mock_response = MagicMock()
+    mock_response.status_code = 200
+    mock_response.headers = {"Content-Length": "100"}
+    mock_response.iter_content.return_value = [b"chunk1"]
+    
+    with patch("requests.get", return_value=mock_response) as mock_get, \
+         patch("builtins.open", MagicMock()):
+        
+        url = f"http://127.0.0.1:{port}/packages/test-package.rpm?remote_url=http://mirror.foo.com/packages/test-package.rpm"
+        try:
+            urllib.request.urlopen(url, timeout=1)
+        except Exception:
+            pass
+            
+        # Assert that requests.get was called with the upgraded HTTPS url
+        mock_get.assert_any_call("https://mirror.foo.com/packages/test-package.rpm", stream=True, timeout=15)
+
+
+def test_http_handler_force_https_disabled(test_server):
+    server, port, mock_cache, mock_node = test_server
+    mock_cache.get_cached_file_by_name.return_value = None
+    mock_node.query_peers_for_package.return_value = []
+    
+    P2PProxyHandler.force_https = False
+    
+    # Mock requests.get to return a successful response
+    mock_response = MagicMock()
+    mock_response.status_code = 200
+    mock_response.headers = {"Content-Length": "100"}
+    mock_response.iter_content.return_value = [b"chunk1"]
+    
+    with patch("requests.get", return_value=mock_response) as mock_get, \
+         patch("builtins.open", MagicMock()):
+        
+        url = f"http://127.0.0.1:{port}/packages/test-package.rpm?remote_url=http://mirror.foo.com/packages/test-package.rpm"
+        try:
+            urllib.request.urlopen(url, timeout=1)
+        except Exception:
+            pass
+            
+        # Assert that requests.get was called with the original HTTP url
+        mock_get.assert_any_call("http://mirror.foo.com/packages/test-package.rpm", stream=True, timeout=15)
 

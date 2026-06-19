@@ -35,6 +35,9 @@ The plugin configuration is loaded from:
     # Enable debug logging (prints plugin messages to stderr)
     debug = false
 
+    # Force upgrading of upstream HTTP mirror URLs to HTTPS (default: true)
+    force_https = true
+
 Configuration options:
 
 * **[main] / enabled**: Enables or disables the DNF5 loading mechanism for
@@ -54,6 +57,9 @@ Configuration options:
   are evicted using an LRU policy (default: ``90.0``).
 * **[p2p] / debug**: Enables verbose ``>>>`` debug messages printed to
   stderr during DNF operations (default: ``false``).
+* **[p2p] / force_https**: Force upgrading upstream HTTP mirror URLs to HTTPS
+  to secure internet traffic. Set to ``false`` to allow using internal mirrors
+  over plain HTTP (default: ``true``).
 
 .. note::
 

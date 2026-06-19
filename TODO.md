@@ -51,7 +51,7 @@ The cache manager (`p2p_cache.py`) handles writing files to `/var/cache/dnf-plug
 
 ---
 
-### 5. Forced HTTPS Upgrades Can Break Internal Mirrors
+### 5. [DONE] Forced HTTPS Upgrades Can Break Internal Mirrors
 In `p2p_server.py`, the proxy automatically rewrites all non-localhost upstream HTTP mirrors to HTTPS:
 ```python
 if remote_url and remote_url.startswith("http://"):

@@ -37,6 +37,7 @@ class P2PProxyHandler(BaseHTTPRequestHandler):
     
     cache: P2PCache = None
     libp2p_node: P2PLibp2pNode = None
+    force_https: bool = True
 
     def do_CONNECT(self):
         """Handle HTTP CONNECT requests to tunnel HTTPS traffic."""
@@ -120,7 +121,7 @@ class P2PProxyHandler(BaseHTTPRequestHandler):
                 remote_url = self.path
 
             # Automatically upgrade HTTP mirror URLs to HTTPS to secure internet traffic
-            if remote_url and remote_url.startswith("http://"):
+            if self.force_https and remote_url and remote_url.startswith("http://"):
                 parsed_remote = urllib.parse.urlparse(remote_url)
                 if parsed_remote.hostname not in ("127.0.0.1", "localhost"):
                     remote_url = remote_url.replace("http://", "https://", 1)
@@ -186,7 +187,7 @@ class P2PProxyHandler(BaseHTTPRequestHandler):
             remote_url = self.path
 
         # Automatically upgrade HTTP mirror URLs to HTTPS to secure internet traffic
-        if remote_url and remote_url.startswith("http://"):
+        if self.force_https and remote_url and remote_url.startswith("http://"):
             parsed_remote = urllib.parse.urlparse(remote_url)
             if parsed_remote.hostname not in ("127.0.0.1", "localhost"):
                 remote_url = remote_url.replace("http://", "https://", 1)
@@ -419,6 +420,7 @@ def main():
     DEFAULT_DEBUG = False
     DEFAULT_MAX_CACHE_SIZE_MB = 1024
     DEFAULT_MAX_DISK_USAGE_PERCENT = 90.0
+    DEFAULT_FORCE_HTTPS = True
 
     parser = argparse.ArgumentParser(
         description="P2P HTTP proxy server for DNF package sharing"
@@ -480,6 +482,13 @@ def main():
         default=None,
         help=f"Maximum disk usage percentage (default: {DEFAULT_MAX_DISK_USAGE_PERCENT})"
     )
+    parser.add_argument(
+        "--no-force-https",
+        action="store_false",
+        dest="force_https",
+        default=None,
+        help="Disable automatic upgrading of HTTP mirror URLs to HTTPS"
+    )
     
     args = parser.parse_args()
 
@@ -536,6 +545,11 @@ def main():
                             config_values["max_disk_usage_percent"] = config.getfloat("p2p", "max_disk_usage_percent")
                         except ValueError:
                             pass
+                    if config.has_option("p2p", "force_https"):
+                        try:
+                            config_values["force_https"] = config.getboolean("p2p", "force_https")
+                        except ValueError:
+                            pass
                 break
             except Exception as e:
                 # Can't use logger yet because logging isn't set up
@@ -551,6 +565,7 @@ def main():
     max_parallel_peers = args.max_parallel_peers if args.max_parallel_peers is not None else config_values.get("max_parallel_peers", DEFAULT_MAX_PARALLEL_PEERS)
     max_cache_size_mb = args.max_cache_size_mb if args.max_cache_size_mb is not None else config_values.get("max_cache_size_mb", DEFAULT_MAX_CACHE_SIZE_MB)
     max_disk_usage_percent = args.max_disk_usage_percent if args.max_disk_usage_percent is not None else config_values.get("max_disk_usage_percent", DEFAULT_MAX_DISK_USAGE_PERCENT)
+    force_https = args.force_https if args.force_https is not None else config_values.get("force_https", DEFAULT_FORCE_HTTPS)
 
     setup_logging(debug=debug)
     
@@ -572,6 +587,7 @@ def main():
     # Pass dependencies to handler
     P2PProxyHandler.cache = cache
     P2PProxyHandler.libp2p_node = libp2p_node
+    P2PProxyHandler.force_https = force_https
     
     # Create HTTP server — prefer systemd-passed socket for socket activation
     try:
