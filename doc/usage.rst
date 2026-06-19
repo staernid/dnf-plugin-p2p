@@ -25,11 +25,12 @@ How It Works (User Perspective)
 -------------------------------
 
 1. **Plugin Initialization**: On every DNF operation, the plugin checks
-   whether the local P2P proxy is running. If not, it starts the
-   ``dnf-p2p-proxy.service``. A ``/ping`` health check verifies the proxy
-   is active and authentic before routing traffic; if the service is
-   unavailable, the plugin transparently falls back to normal DNF
-   behavior.
+   whether the local P2P proxy is running. If not and the command is run with
+   root privileges, it starts the ``dnf-p2p-proxy.service``. When run as a
+   non-root user, the auto-start is bypassed to prevent console Polkit authentication
+   prompts. A ``/ping`` health check verifies the proxy is active and authentic
+   before routing traffic; if the service is unavailable, the plugin transparently
+   falls back to normal DNF behavior.
 
 2. **Peer Discovery**: The proxy's ``py-libp2p`` node uses mDNS for
    automatic zero-configuration local peer discovery. No manual peer
