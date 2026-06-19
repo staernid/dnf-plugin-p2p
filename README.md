@@ -113,16 +113,6 @@ max_parallel_peers = 5
 
 *Note: The local proxy service manages peer discovery over libp2p. Under the hood, the proxy's `py-libp2p` node performs mDNS discovery automatically to locate nearby nodes and execute secure JSON package queries. HTTPS connections are tunneled securely (without MITM decryption) to maintain TLS integrity, meaning only HTTP repository traffic is cached and shared via P2P.*
 
-## Usage
-
-
-Once installed and configured, the plugin operates transparently. No special commands are required:
-
-```bash
-dnf install package-name
-# Plugin will automatically try P2P peers before remote mirrors
-```
-
 ## Building Documentation
 
 ```bash

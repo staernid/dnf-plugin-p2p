@@ -37,15 +37,21 @@ class Plugin(libdnf5.plugin.IPlugin):
 
     def __init__(self, data):
         super().__init__(data)
-        print(">>> P2P PLUG-IN INSTANTIATED <<<", file=sys.stderr)
+        logger.debug("P2P Sharing Plugin: Instantiated")
         self.base = self.get_base()
         self.proxy_process = None
         self.proxy_port = 8888
         self.proxy_host = "127.0.0.1"
         self.enabled = False
+        self.debug = False
         self.cache_enabled = True
         self.multicast_group = "224.0.0.1"
         self.multicast_port = 5353
+
+    def _print(self, message):
+        """Print message to stderr only if debug mode is enabled."""
+        if self.debug:
+            print(message, file=sys.stderr)
 
     @staticmethod
     def get_api_version():
@@ -83,19 +89,19 @@ class Plugin(libdnf5.plugin.IPlugin):
 
     def init(self):
         """Plugin initialization - load configuration and start proxy server."""
-        print(">>> P2P PLUG-IN INITIALIZED <<<", file=sys.stderr)
-        logger.info("P2P Sharing Plugin: Initializing")
-        
-        # Load configuration
+        # Load configuration first to check debug and enabled settings
         self._load_config()
         
+        self._print(">>> P2P PLUG-IN INITIALIZED <<<")
+        logger.info("P2P Sharing Plugin: Initializing")
+        
         if not self.enabled:
-            print(">>> P2P PLUG-IN DISABLED (check config) <<<", file=sys.stderr)
+            self._print(">>> P2P PLUG-IN DISABLED (check config) <<<")
             logger.info("P2P Sharing Plugin: Disabled in configuration")
             return
         
         # Start the local proxy server
-        print(">>> P2P PLUG-IN STARTING PROXY SERVER <<<", file=sys.stderr)
+        self._print(">>> P2P PLUG-IN STARTING PROXY SERVER <<<")
         self._start_proxy_server()
         logger.info(f"P2P Sharing Plugin: Proxy server started on {self.proxy_host}:{self.proxy_port}")
 
@@ -124,6 +130,9 @@ class Plugin(libdnf5.plugin.IPlugin):
                 if config.has_option("p2p", "enabled"):
                     self.enabled = config.getboolean("p2p", "enabled")
                 
+                if config.has_option("p2p", "debug"):
+                    self.debug = config.getboolean("p2p", "debug")
+                
                 if config.has_option("p2p", "proxy_port"):
                     self.proxy_port = config.getint("p2p", "proxy_port")
                 
@@ -147,7 +156,7 @@ class Plugin(libdnf5.plugin.IPlugin):
         try:
             # Check if proxy is already active and listening
             with socket.create_connection((self.proxy_host, self.proxy_port), timeout=0.1):
-                print(">>> P2P PROXY ALREADY ACTIVE <<<", file=sys.stderr)
+                self._print(">>> P2P PROXY ALREADY ACTIVE <<<")
                 logger.info("P2P Sharing Plugin: proxy is already active")
                 return
         except (ConnectionRefusedError, socket.timeout, OSError):
@@ -159,7 +168,7 @@ class Plugin(libdnf5.plugin.IPlugin):
                 capture_output=True, text=True, timeout=10
             )
             if result.returncode == 0:
-                print(">>> P2P PROXY SERVICE STARTED <<<", file=sys.stderr)
+                self._print(">>> P2P PROXY SERVICE STARTED <<<")
                 logger.info("P2P Sharing Plugin: dnf-p2p-proxy.service started")
             else:
                 logger.info(
@@ -178,7 +187,7 @@ class Plugin(libdnf5.plugin.IPlugin):
         
         Modifies repository configurations to route downloads through our local P2P proxy.
         """
-        print(">>> P2P PLUG-IN REPOS CONFIGURED <<<", file=sys.stderr)
+        self._print(">>> P2P PLUG-IN REPOS CONFIGURED <<<")
         if not self.enabled:
             return True
         
@@ -194,7 +203,7 @@ class Plugin(libdnf5.plugin.IPlugin):
             pass
 
         if not proxy_active:
-            print(">>> P2P PROXY NOT ACTIVE OR CONFLICTING SERVICE: BYPASSING <<<", file=sys.stderr)
+            self._print(">>> P2P PROXY NOT ACTIVE OR CONFLICTING SERVICE: BYPASSING <<<")
             logger.warning("P2P Sharing Plugin: Local proxy is not active or responding. Bypassing P2P proxy for safety.")
             return True
 
@@ -210,7 +219,7 @@ class Plugin(libdnf5.plugin.IPlugin):
                 if not repo.is_local():
                     config = repo.get_config()
                     config.proxy = proxy_url
-                    print(f">>> Proxied repo {repo.get_id()} through {proxy_url} <<<", file=sys.stderr)
+                    self._print(f">>> Proxied repo {repo.get_id()} through {proxy_url} <<<")
                     logger.debug(f"P2P Sharing Plugin: Proxied repo {repo.get_id()} through {proxy_url}")
         except Exception as e:
             logger.error(f"P2P Sharing Plugin: Error in repos_configured hook: {e}")
@@ -224,4 +233,5 @@ class Plugin(libdnf5.plugin.IPlugin):
     def finish(self):
         """Plugin cleanup — proxy daemon is intentionally left running across DNF5 invocations."""
         logger.debug("P2P Sharing Plugin: Finish hook called (proxy daemon continues running)")
+
 

@@ -106,8 +106,10 @@ python3 -m pip install \
 %files
 %config(noreplace) %{_sysconfdir}/dnf/libdnf5-plugins/python_plugins_loader.d/p2p_plugin.conf
 %{_sysconfdir}/profile.d/libdnf-python-plugin.sh
+%{_sysconfdir}/environment.d/libdnf-python-plugin.conf
 %{python3_sitelib}/libdnf_plugins/p2p_plugin.py
 %{python3_sitelib}/libdnf_plugins/__pycache__/p2p_plugin*.pyc
+
 
 %files -n python3-%{name}-common
 %{python3_sitelib}/libdnf_p2p_sharing/
