@@ -1,0 +1,2 @@
+# Enable libdnf5 Python plugin loader for dnf-plugin-p2p
+LIBDNF_PYTHON_PLUGIN_DIR=@PYTHON_INSTALL_DIR@/libdnf_plugins

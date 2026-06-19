@@ -1,6 +1,13 @@
+configure_file(
+    libdnf-python-plugin.sh.in
+    ${CMAKE_CURRENT_BINARY_DIR}/libdnf-python-plugin.sh
+    @ONLY
+)
+
 install(
     FILES
-        libdnf-python-plugin.sh
+        ${CMAKE_CURRENT_BINARY_DIR}/libdnf-python-plugin.sh
     DESTINATION
-        /etc/profile.d
+        ${SYSCONFDIR}/profile.d
 )
+
