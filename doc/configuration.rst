@@ -26,6 +26,12 @@ The plugin configuration is loaded from:
     # Enable caching for sharing with peers
     cache_enabled = true
 
+    # Maximum package cache size in MB (0 or less to disable size limits)
+    max_cache_size_mb = 1024
+
+    # Maximum disk usage percentage for the cache file system (0 or less to disable disk space checks)
+    max_disk_usage_percent = 90.0
+
     # Enable debug logging (prints plugin messages to stderr)
     debug = false
 
@@ -40,6 +46,12 @@ Configuration options:
   (default: ``127.0.0.1``).
 * **[p2p] / cache_enabled**: Enables caching packages locally to serve to
   other peers.
+* **[p2p] / max_cache_size_mb**: Maximum size of the package cache in MB.
+  If the cache exceeds this size, the oldest packages are evicted using an LRU
+  policy (default: ``1024``).
+* **[p2p] / max_disk_usage_percent**: Maximum disk usage percentage for the
+  cache filesystem. If usage goes above this threshold, the oldest packages
+  are evicted using an LRU policy (default: ``90.0``).
 * **[p2p] / debug**: Enables verbose ``>>>`` debug messages printed to
   stderr during DNF operations (default: ``false``).
 
@@ -89,7 +101,8 @@ With the following content:
     ExecStart=
     ExecStart=/usr/bin/python3 /usr/libexec/dnf-plugin-p2p/p2p_server.py \
         --host=0.0.0.0 --port=8888 --libp2p-port=8000 \
-        --cache-dir=/var/cache/dnf-plugin-p2p
+        --cache-dir=/var/cache/dnf-plugin-p2p \
+        --max-cache-size-mb=1024 --max-disk-usage-percent=90.0
 
 Then reload and restart:
 
