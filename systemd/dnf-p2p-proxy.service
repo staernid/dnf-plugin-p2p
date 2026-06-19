@@ -5,10 +5,10 @@ After=network.target
 
 [Service]
 Type=simple
-ExecStart=/usr/bin/python3 /usr/libexec/libdnf-p2p-sharing/p2p_server.py \
+ExecStart=/usr/bin/python3 /usr/libexec/dnf-plugin-p2p/p2p_server.py \
     --host=127.0.0.1 \
     --port=8888 \
-    --cache-dir=/var/cache/libdnf-p2p-sharing
+    --cache-dir=/var/cache/dnf-plugin-p2p
 
 # Automatically restart if it crashes; not on clean exit
 Restart=on-failure
@@ -24,8 +24,8 @@ NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=read-only
 PrivateTmp=true
-CacheDirectory=libdnf-p2p-sharing
-ReadWritePaths=/var/cache/libdnf5 /var/cache/libdnf-p2p-sharing /tmp
+CacheDirectory=dnf-plugin-p2p
+ReadWritePaths=/var/cache/libdnf5 /var/cache/dnf-plugin-p2p /tmp
 
 [Install]
 WantedBy=multi-user.target

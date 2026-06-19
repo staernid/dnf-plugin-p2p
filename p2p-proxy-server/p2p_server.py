@@ -370,7 +370,7 @@ def main():
     )
     parser.add_argument(
         "--cache-dir",
-        default=str(Path.home() / ".cache" / "libdnf-p2p-sharing"),
+        default=str(Path.home() / ".cache" / "dnf-plugin-p2p"),
         help="Package cache directory"
     )
     parser.add_argument(
