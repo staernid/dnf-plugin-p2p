@@ -8,6 +8,7 @@ Type=simple
 ExecStart=/usr/bin/python3 /usr/libexec/dnf-plugin-p2p/p2p_server.py \
     --host=127.0.0.1 \
     --port=8888 \
+    --libp2p-port=8000 \
     --cache-dir=/var/cache/dnf-plugin-p2p
 
 # Automatically restart if it crashes; not on clean exit

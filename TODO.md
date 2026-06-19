@@ -60,7 +60,7 @@ if remote_url and remote_url.startswith("http://"):
         remote_url = remote_url.replace("http://", "https://", 1)
 ```
 
-### 6. Default Systemd Service Port Configuration Bug
+### 6. [DONE] Default Systemd Service Port Configuration Bug
 * **The issue:** In `p2p_libp2p.py`, if the `libp2p_port` option is `0` (the default), it binds to a random free port. However, `py-libp2p`'s `MDNSDiscovery` hardcodes the advertised port to `8000`.
 * **The bug:** In `systemd/dnf-p2p-proxy.service`, the default `ExecStart` command does **not** specify `--libp2p-port=8000`. This means the daemon binds to a random port by default. Other nodes discover it via mDNS, try to connect on port 8000, and immediately fail to connect.
 * **The fix:** The systemd service file's `ExecStart` command should explicitly default to `--libp2p-port=8000`.
