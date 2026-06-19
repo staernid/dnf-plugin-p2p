@@ -31,17 +31,19 @@ BuildRequires:  systemd-rpm-macros
 %description
 Peer-to-peer package sharing plugin for libdnf5.
 
-%package -n python3-libdnf5-plugin-p2p-sharing
+%package -n libdnf5-plugin-p2p-sharing
 Summary:        P2P sharing plugin for libdnf5
 BuildArch:      noarch
-Requires:       python3-libdnf5
+Requires:       python3-libdnf5-python-plugins-loader
 Requires:       python3-%{name}-common = %{version}-%{release}
 Requires:       %{name}-proxy = %{version}-%{release}
 Provides:       dnf-plugin-p2p = %{version}-%{release}
 Provides:       dnf5-plugin-p2p = %{version}-%{release}
 Provides:       python3-dnf5-plugin-p2p = %{version}-%{release}
+Provides:       python3-libdnf5-plugin-p2p-sharing = %{version}-%{release}
+Obsoletes:      python3-libdnf5-plugin-p2p-sharing < %{version}-%{release}
 
-%description -n python3-libdnf5-plugin-p2p-sharing
+%description -n libdnf5-plugin-p2p-sharing
 This package contains the P2P package sharing plugin for libdnf5.
 
 %package -n python3-%{name}-common
@@ -102,7 +104,7 @@ python3 -m pip install \
     --no-deps \
     fastecdsa py-multibase py-multihash py-multicodec py-cid trio-typing rpcudp libp2p
 
-%files -n python3-libdnf5-plugin-p2p-sharing
+%files -n libdnf5-plugin-p2p-sharing
 %config(noreplace) %{_sysconfdir}/dnf/libdnf5-plugins/python_plugins_loader.d/p2p_plugin.conf
 %{_sysconfdir}/profile.d/libdnf-python-plugin.sh
 %{python3_sitelib}/libdnf_plugins/p2p_plugin.py
