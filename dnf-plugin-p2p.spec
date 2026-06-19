@@ -16,6 +16,7 @@ Source5:        https://files.pythonhosted.org/packages/96/8e/68c2bd0346247570e8
 Source6:        https://files.pythonhosted.org/packages/b5/74/a87aafa40ec3a37089148b859892cbe2eef08d132c816d58a60459be5337/trio-typing-0.10.0.tar.gz
 Source7:        https://files.pythonhosted.org/packages/39/5b/99ee4dd6080d857f029ad209860d461305f5fba9fef2316548a1d131e4c2/rpcudp-5.0.1.tar.gz
 Source8:        https://files.pythonhosted.org/packages/98/b7/3d6a5eb9f1788da09371ee1be08768b72fdcd956cee0f3f92a8ef1819862/libp2p-0.6.0.tar.gz
+Source9:        https://files.pythonhosted.org/packages/source/p/pycryptodome/pycryptodome-3.20.0.tar.gz
 
 BuildRequires:  cmake >= 3.5.0
 BuildRequires:  python3-sphinx
@@ -61,7 +62,6 @@ Requires:       python3-cbor2
 Requires:       python3-coincurve
 Requires:       python3-noiseprotocol
 Requires:       python3-protobuf
-Requires:       python3-pycryptodome
 Requires:       python3-pynacl
 Requires:       python3-requests
 Requires:       python3-zeroconf
@@ -76,6 +76,7 @@ Provides:       bundled(python3dist(py-cid)) = 0.5.0
 Provides:       bundled(python3dist(trio-typing)) = 0.10.0
 Provides:       bundled(python3dist(rpcudp)) = 5.0.1
 Provides:       bundled(python3dist(libp2p)) = 0.6.0
+Provides:       bundled(python3dist(pycryptodome)) = 3.20.0
 Provides:       libdnf-p2p-sharing-proxy = %{version}-%{release}
 Obsoletes:      libdnf-p2p-sharing-proxy < %{version}-%{release}
 
@@ -100,7 +101,7 @@ python3 -m pip install \
     --target=%{buildroot}%{_libexecdir}/%{name} \
     --no-build-isolation \
     --no-deps \
-    fastecdsa py-multibase py-multihash py-multicodec py-cid trio-typing rpcudp libp2p
+    fastecdsa py-multibase py-multihash py-multicodec py-cid trio-typing rpcudp libp2p pycryptodome
 
 %files
 %config(noreplace) %{_sysconfdir}/dnf/libdnf5-plugins/python_plugins_loader.d/p2p_plugin.conf
