@@ -123,13 +123,15 @@ class P2PLibp2pNode:
             results = []
             peer_ids = list(self.discovered_peers.keys())
             logger.debug(f"Querying {len(peer_ids)} discovered peers for {package_name}")
-            
-            for peer_id_str in peer_ids:
-                peerinfo = self.discovered_peers[peer_id_str]
+
+            async def query_peer(peer_id_str: str):
+                peerinfo = self.discovered_peers.get(peer_id_str)
+                if not peerinfo:
+                    return
                 try:
                     logger.debug(f"Connecting to peer {peer_id_str}...")
                     await self.host.connect(peerinfo)
-                    
+
                     logger.debug(f"Sending query request to {peer_id_str}...")
                     response = await self.rr.send_request(
                         peer_id=peerinfo.peer_id,
@@ -137,7 +139,7 @@ class P2PLibp2pNode:
                         request={"package": package_name},
                         codec=self.codec
                     )
-                    
+
                     if response and response.get("has_package"):
                         ip = extract_ip(peerinfo.addrs)
                         if ip:
@@ -152,6 +154,11 @@ class P2PLibp2pNode:
                     logger.warning(f"Failed to query peer {peer_id_str}: {e}")
                     # Remove unresponsive peer
                     self.discovered_peers.pop(peer_id_str, None)
+
+            with trio.move_on_after(2.0):
+                async with trio.open_nursery() as nursery:
+                    for peer_id_str in peer_ids:
+                        nursery.start_soon(query_peer, peer_id_str)
             return results
 
         try:

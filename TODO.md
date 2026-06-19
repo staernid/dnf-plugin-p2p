@@ -20,7 +20,7 @@ For large RPM packages (e.g. 100+ MB), reading and calculating the SHA-256 hash 
 
 ---
 
-### 2. Sequential, Blocking Peer Queries
+### 2. [DONE] Sequential, Blocking Peer Queries
 In `p2p_libp2p.py`, `query_peers_for_package` queries discovered peers in a simple sequential `for` loop:
 ```python
 for peer_id_str in peer_ids:
