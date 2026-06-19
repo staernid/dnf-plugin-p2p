@@ -409,50 +409,137 @@ class ThreadingHTTPServer(ThreadingMixIn, HTTPServer):
 
 def main():
     """Main entry point for the P2P proxy server."""
+    # Hardcoded default values
+    DEFAULT_HOST = "127.0.0.1"
+    DEFAULT_PORT = 8888
+    DEFAULT_LIBP2P_PORT = 0
+    DEFAULT_CACHE_DIR = str(Path.home() / ".cache" / "dnf-plugin-p2p")
+    DEFAULT_PEER_DISCOVERY_TIMEOUT = 2.0
+    DEFAULT_MAX_PARALLEL_PEERS = 5
+    DEFAULT_DEBUG = False
+
     parser = argparse.ArgumentParser(
         description="P2P HTTP proxy server for DNF package sharing"
     )
     parser.add_argument(
+        "--config",
+        default=None,
+        help="Path to the configuration file"
+    )
+    parser.add_argument(
         "--host",
-        default="127.0.0.1",
-        help="Host to bind to (default: 127.0.0.1)"
+        default=None,
+        help=f"Host to bind to (default: {DEFAULT_HOST})"
     )
     parser.add_argument(
         "--port",
         type=int,
-        default=8888,
-        help="HTTP proxy port (default: 8888)"
+        default=None,
+        help=f"HTTP proxy port (default: {DEFAULT_PORT})"
     )
     parser.add_argument(
         "--libp2p-port",
         type=int,
-        default=0,
-        help="libp2p listener port (default: 0 / automatic)"
+        default=None,
+        help=f"libp2p listener port (default: {DEFAULT_LIBP2P_PORT})"
     )
     parser.add_argument(
         "--cache-dir",
-        default=str(Path.home() / ".cache" / "dnf-plugin-p2p"),
-        help="Package cache directory"
+        default=None,
+        help=f"Package cache directory (default: {DEFAULT_CACHE_DIR})"
+    )
+    parser.add_argument(
+        "--peer-discovery-timeout",
+        type=float,
+        default=None,
+        help=f"Timeout for peer discovery queries in seconds (default: {DEFAULT_PEER_DISCOVERY_TIMEOUT})"
+    )
+    parser.add_argument(
+        "--max-parallel-peers",
+        type=int,
+        default=None,
+        help=f"Maximum number of parallel peer queries (default: {DEFAULT_MAX_PARALLEL_PEERS})"
     )
     parser.add_argument(
         "--debug",
         action="store_true",
+        default=None,
         help="Enable debug logging"
     )
     
     args = parser.parse_args()
-    setup_logging(debug=args.debug)
+
+    # Load config file
+    config_paths = []
+    if args.config:
+        config_paths.append(Path(args.config))
+    else:
+        config_paths.extend([
+            Path("/etc/dnf/libdnf5-plugins/python_plugins_loader.d/p2p_plugin.conf"),
+            Path("/etc/dnf/libdnf5-plugins/p2p-plugin.conf"),
+            Path("/etc/dnf/libdnf5-plugins/p2p_plugin.conf"),
+            Path("/etc/dnf/libdnf-plugins/p2p-plugin.conf"),
+            Path("/etc/dnf/plugins/p2p-plugin.conf"),
+        ])
+
+    config_values = {}
+    for path in config_paths:
+        if path.exists():
+            try:
+                from configparser import ConfigParser
+                config = ConfigParser()
+                config.read(path)
+                if config.has_section("p2p"):
+                    if config.has_option("p2p", "proxy_host"):
+                        config_values["host"] = config.get("p2p", "proxy_host")
+                    if config.has_option("p2p", "proxy_port"):
+                        try:
+                            config_values["port"] = config.getint("p2p", "proxy_port")
+                        except ValueError:
+                            pass
+                    if config.has_option("p2p", "peer_discovery_timeout"):
+                        try:
+                            config_values["peer_discovery_timeout"] = config.getfloat("p2p", "peer_discovery_timeout")
+                        except ValueError:
+                            pass
+                    if config.has_option("p2p", "max_parallel_peers"):
+                        try:
+                            config_values["max_parallel_peers"] = config.getint("p2p", "max_parallel_peers")
+                        except ValueError:
+                            pass
+                    if config.has_option("p2p", "debug"):
+                        try:
+                            config_values["debug"] = config.getboolean("p2p", "debug")
+                        except ValueError:
+                            pass
+                break
+            except Exception as e:
+                # Can't use logger yet because logging isn't set up
+                print(f"Warning: Failed to load config from {path}: {e}", file=sys.stderr)
+
+    # Merge configuration values
+    host = args.host if args.host is not None else config_values.get("host", DEFAULT_HOST)
+    port = args.port if args.port is not None else config_values.get("port", DEFAULT_PORT)
+    libp2p_port = args.libp2p_port if args.libp2p_port is not None else DEFAULT_LIBP2P_PORT
+    cache_dir = args.cache_dir if args.cache_dir is not None else DEFAULT_CACHE_DIR
+    debug = args.debug if args.debug is not None else config_values.get("debug", DEFAULT_DEBUG)
+    peer_discovery_timeout = args.peer_discovery_timeout if args.peer_discovery_timeout is not None else config_values.get("peer_discovery_timeout", DEFAULT_PEER_DISCOVERY_TIMEOUT)
+    max_parallel_peers = args.max_parallel_peers if args.max_parallel_peers is not None else config_values.get("max_parallel_peers", DEFAULT_MAX_PARALLEL_PEERS)
+
+    setup_logging(debug=debug)
     
     # Initialize cache
-    cache_path = Path(args.cache_dir).expanduser()
+    cache_path = Path(cache_dir).expanduser()
     cache = P2PCache(cache_path)
     
     # Start libp2p node
     logger.info("Initializing libp2p node...")
     libp2p_node = P2PLibp2pNode(
-        libp2p_port=args.libp2p_port,
-        local_http_port=args.port,
-        cache_lookup_callback=cache.lookup_filename
+        libp2p_port=libp2p_port,
+        local_http_port=port,
+        cache_lookup_callback=cache.lookup_filename,
+        peer_discovery_timeout=peer_discovery_timeout,
+        max_parallel_peers=max_parallel_peers
     )
     libp2p_node.start()
 
@@ -465,15 +552,15 @@ def main():
         sd_sock = _get_systemd_socket()
         if sd_sock is not None:
             logger.info("Using systemd socket-activated fd")
-            server = ThreadingHTTPServer(server_address=(args.host, args.port),
+            server = ThreadingHTTPServer(server_address=(host, port),
                                          RequestHandlerClass=P2PProxyHandler,
                                          bind_and_activate=False)
             server.socket = sd_sock
             server.server_address = sd_sock.getsockname()
         else:
-            server = ThreadingHTTPServer((args.host, args.port), P2PProxyHandler)
+            server = ThreadingHTTPServer((host, port), P2PProxyHandler)
 
-        logger.info(f"P2P proxy HTTP server listening on http://{args.host}:{args.port}")
+        logger.info(f"P2P proxy HTTP server listening on http://{host}:{port}")
         server.serve_forever()
     except KeyboardInterrupt:
         logger.info("Shutting down P2P proxy server")

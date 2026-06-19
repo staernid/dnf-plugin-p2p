@@ -26,7 +26,32 @@ def test_node_init():
     assert node.libp2p_port == 0
     assert node.local_http_port == 8888
     assert node.cache_lookup_callback == cache_cb
+    assert node.peer_discovery_timeout == 2.0
+    assert node.max_parallel_peers == 5
     assert node.trio_token is None
+
+    # Custom valid values
+    node_custom = P2PLibp2pNode(
+        libp2p_port=0,
+        local_http_port=8888,
+        cache_lookup_callback=cache_cb,
+        peer_discovery_timeout=4.5,
+        max_parallel_peers=10
+    )
+    assert node_custom.peer_discovery_timeout == 4.5
+    assert node_custom.max_parallel_peers == 10
+
+    # Under-limit/invalid values should be clamped
+    node_clamped = P2PLibp2pNode(
+        libp2p_port=0,
+        local_http_port=8888,
+        cache_lookup_callback=cache_cb,
+        peer_discovery_timeout=0.0,
+        max_parallel_peers=-5
+    )
+    assert node_clamped.peer_discovery_timeout == 0.1
+    assert node_clamped.max_parallel_peers == 1
+
 
 
 def test_query_peers_for_package_success_and_timeout():

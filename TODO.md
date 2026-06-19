@@ -33,7 +33,7 @@ for peer_id_str in peer_ids:
 
 ---
 
-### 3. Ignored User Configuration
+### 3. [DONE] Ignored User Configuration
 The DNF configuration file (`/etc/dnf/libdnf5-plugins/python_plugins_loader.d/p2p_plugin.conf`) contains settings like:
 ```ini
 peer_discovery_timeout = 2

@@ -34,10 +34,13 @@ def extract_ip(addrs) -> Optional[str]:
 class P2PLibp2pNode:
     """A thread-safe wrapper around py-libp2p for local peer discovery and querying."""
 
-    def __init__(self, libp2p_port: int, local_http_port: int, cache_lookup_callback: Callable[[str], Optional[Dict]]):
+    def __init__(self, libp2p_port: int, local_http_port: int, cache_lookup_callback: Callable[[str], Optional[Dict]],
+                 peer_discovery_timeout: float = 2.0, max_parallel_peers: int = 5):
         self.libp2p_port = libp2p_port
         self.local_http_port = local_http_port
         self.cache_lookup_callback = cache_lookup_callback
+        self.peer_discovery_timeout = max(0.1, peer_discovery_timeout)
+        self.max_parallel_peers = max(1, max_parallel_peers)
         self.discovered_peers: Dict[str, PeerInfo] = {}
         self.trio_token = None
         self.host = None
@@ -123,39 +126,41 @@ class P2PLibp2pNode:
             results = []
             peer_ids = list(self.discovered_peers.keys())
             logger.debug(f"Querying {len(peer_ids)} discovered peers for {package_name}")
+            limit = trio.CapacityLimiter(self.max_parallel_peers)
 
             async def query_peer(peer_id_str: str):
-                peerinfo = self.discovered_peers.get(peer_id_str)
-                if not peerinfo:
-                    return
-                try:
-                    logger.debug(f"Connecting to peer {peer_id_str}...")
-                    await self.host.connect(peerinfo)
+                async with limit:
+                    peerinfo = self.discovered_peers.get(peer_id_str)
+                    if not peerinfo:
+                        return
+                    try:
+                        logger.debug(f"Connecting to peer {peer_id_str}...")
+                        await self.host.connect(peerinfo)
 
-                    logger.debug(f"Sending query request to {peer_id_str}...")
-                    response = await self.rr.send_request(
-                        peer_id=peerinfo.peer_id,
-                        protocol_ids=[PROTOCOL_ID],
-                        request={"package": package_name},
-                        codec=self.codec
-                    )
+                        logger.debug(f"Sending query request to {peer_id_str}...")
+                        response = await self.rr.send_request(
+                            peer_id=peerinfo.peer_id,
+                            protocol_ids=[PROTOCOL_ID],
+                            request={"package": package_name},
+                            codec=self.codec
+                        )
 
-                    if response and response.get("has_package"):
-                        ip = extract_ip(peerinfo.addrs)
-                        if ip:
-                            results.append({
-                                "ip": ip,
-                                "port": response.get("http_port"),
-                                "hash": response.get("hash"),
-                                "size": response.get("size")
-                            })
-                            logger.info(f"Peer {peer_id_str} at {ip}:{response.get('http_port')} has package {package_name}")
-                except Exception as e:
-                    logger.warning(f"Failed to query peer {peer_id_str}: {e}")
-                    # Remove unresponsive peer
-                    self.discovered_peers.pop(peer_id_str, None)
+                        if response and response.get("has_package"):
+                            ip = extract_ip(peerinfo.addrs)
+                            if ip:
+                                results.append({
+                                    "ip": ip,
+                                    "port": response.get("http_port"),
+                                    "hash": response.get("hash"),
+                                    "size": response.get("size")
+                                })
+                                logger.info(f"Peer {peer_id_str} at {ip}:{response.get('http_port')} has package {package_name}")
+                    except Exception as e:
+                        logger.warning(f"Failed to query peer {peer_id_str}: {e}")
+                        # Remove unresponsive peer
+                        self.discovered_peers.pop(peer_id_str, None)
 
-            with trio.move_on_after(2.0):
+            with trio.move_on_after(self.peer_discovery_timeout):
                 async with trio.open_nursery() as nursery:
                     for peer_id_str in peer_ids:
                         nursery.start_soon(query_peer, peer_id_str)

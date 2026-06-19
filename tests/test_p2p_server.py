@@ -85,3 +85,70 @@ def test_http_handler_peer_fallback(test_server):
         # Assert that it queried the libp2p node and tried to download from the peer
         mock_node.query_peers_for_package.assert_called_with("test-package.rpm")
         mock_get.assert_any_call("http://192.168.1.100:8888/packages/test-package.rpm", stream=True, timeout=15)
+
+
+def test_main_config_loading_and_override():
+    import sys
+    from p2p_server import main
+    from unittest.mock import patch, MagicMock
+
+    # Create mock node and server to prevent main() from actually running the server
+    mock_node_instance = MagicMock()
+    mock_server_instance = MagicMock()
+
+    # Define a custom exception to interrupt main() right when it tries to serve_forever()
+    class ServeForeverCalled(BaseException):
+        pass
+
+    mock_server_instance.serve_forever.side_effect = ServeForeverCalled()
+
+    # Mock command line arguments
+    test_argv = ["p2p_server.py", "--config", "/mock/path/p2p_plugin.conf", "--host", "127.0.0.9"]
+
+    with patch("sys.argv", test_argv), \
+         patch("pathlib.Path.exists", return_value=True), \
+         patch("configparser.ConfigParser.read") as mock_read, \
+         patch("configparser.ConfigParser.has_section", return_value=True), \
+         patch("configparser.ConfigParser.has_option", side_effect=lambda sec, opt: True), \
+         patch("configparser.ConfigParser.get", side_effect=lambda sec, opt: {
+             "proxy_host": "127.0.0.2",
+             "proxy_port": "9999",
+             "peer_discovery_timeout": "4.5",
+             "max_parallel_peers": "12",
+             "debug": "true"
+         }[opt]), \
+         patch("configparser.ConfigParser.getint", side_effect=lambda sec, opt: {
+             "proxy_port": 9999,
+             "max_parallel_peers": 12
+         }[opt]), \
+         patch("configparser.ConfigParser.getfloat", side_effect=lambda sec, opt: {
+             "peer_discovery_timeout": 4.5
+         }[opt]), \
+         patch("configparser.ConfigParser.getboolean", side_effect=lambda sec, opt: {
+             "debug": True
+         }[opt]), \
+         patch("p2p_server.P2PLibp2pNode", return_value=mock_node_instance) as mock_node_cls, \
+         patch("p2p_server.P2PCache") as mock_cache_cls, \
+         patch("p2p_server.ThreadingHTTPServer", return_value=mock_server_instance) as mock_server_cls:
+
+        with pytest.raises(ServeForeverCalled):
+            main()
+
+        # Assert node initialization parameters
+        # `--host 127.0.0.9` should override config file "127.0.0.2"
+        # Since `--port` was not specified, it should fall back to config file "9999"
+        # Since `--peer-discovery-timeout` was not specified, it should fall back to config file "4.5"
+        # Since `--max-parallel-peers` was not specified, it should fall back to config file "12"
+        mock_node_cls.assert_called_once_with(
+            libp2p_port=0,
+            local_http_port=9999,
+            cache_lookup_callback=mock_cache_cls.return_value.lookup_filename,
+            peer_discovery_timeout=4.5,
+            max_parallel_peers=12
+        )
+
+        mock_server_cls.assert_called_once_with(
+            ("127.0.0.9", 9999),
+            mock_server_cls.call_args[0][1] # P2PProxyHandler
+        )
+
