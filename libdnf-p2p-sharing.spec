@@ -1,3 +1,4 @@
+%global debug_package %{nil}
 %{!?dnf_lowest_compatible: %global dnf_lowest_compatible 4.4.3}
 
 Name:           libdnf-p2p-sharing
