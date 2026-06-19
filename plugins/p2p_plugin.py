@@ -186,11 +186,11 @@ class Plugin(libdnf5.plugin.IPlugin):
         import socket
         proxy_active = False
         try:
-            with socket.create_connection((self.proxy_host, self.proxy_port), timeout=0.2) as sock:
-                sock.settimeout(0.2)
+            with socket.create_connection((self.proxy_host, self.proxy_port), timeout=0.5) as sock:
+                sock.settimeout(0.5)
                 sock.sendall(b"GET /ping HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n")
                 response = sock.recv(1024)
-                if b"HTTP/1.1 200" in response and b"pong" in response:
+                if b" 200 " in response and b"pong" in response:
                     proxy_active = True
         except Exception:
             pass
