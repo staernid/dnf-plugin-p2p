@@ -38,6 +38,12 @@ The plugin configuration is loaded from:
     # Force upgrading of upstream HTTP mirror URLs to HTTPS (default: true)
     force_https = true
 
+    # libp2p listener port (default: 8000)
+    libp2p_port = 8000
+
+    # Package cache directory (default: /var/cache/dnf-plugin-p2p when root)
+    cache_dir = /var/cache/dnf-plugin-p2p
+
 Configuration options:
 
 * **[main] / enabled**: Enables or disables the DNF5 loading mechanism for
@@ -60,6 +66,11 @@ Configuration options:
 * **[p2p] / force_https**: Force upgrading upstream HTTP mirror URLs to HTTPS
   to secure internet traffic. Set to ``false`` to allow using internal mirrors
   over plain HTTP (default: ``true``).
+* **[p2p] / libp2p_port**: Port for the libp2p listener and mDNS discovery
+  (default: ``8000``).
+* **[p2p] / cache_dir**: Package cache directory path (default:
+  ``/var/cache/dnf-plugin-p2p`` when run as root, otherwise
+  ``~/.cache/dnf-plugin-p2p``).
 
 .. note::
 
@@ -83,32 +94,31 @@ The P2P proxy server is managed by systemd:
     # View real-time service logs
     journalctl -u dnf-p2p-proxy.service -f
 
-Service Overrides
-~~~~~~~~~~~~~~~~~
+Service Customization
+~~~~~~~~~~~~~~~~~~~~~
 
-The systemd service may require overrides for two settings:
+The background daemon is fully configurable via the main configuration file
+``/etc/dnf/libdnf5-plugins/python_plugins_loader.d/p2p_plugin.conf``.
+Changes to settings such as ``proxy_host`` (e.g. set to ``0.0.0.0`` to share with the LAN),
+``proxy_port``, ``libp2p_port``, or the cache limits will be read directly by the
+systemd service on startup.
 
-1. **Bind address** — must be ``0.0.0.0`` so peers can download packages
-   over the LAN (default in the unit is ``127.0.0.1``).
-2. **libp2p port** — must be ``8000`` to match the port advertised by
-   mDNS discovery.
-
-Create a drop-in override:
+If you need to change command-line parameters that are not exposed in the
+configuration file, you can create a systemd drop-in override:
 
 .. code-block:: bash
 
     sudo systemctl edit dnf-p2p-proxy.service
 
-With the following content:
+With the following content to add custom arguments:
 
 .. code-block:: ini
 
     [Service]
     ExecStart=
     ExecStart=/usr/bin/python3 /usr/libexec/dnf-plugin-p2p/p2p_server.py \
-        --host=0.0.0.0 --port=8888 --libp2p-port=8000 \
-        --cache-dir=/var/cache/dnf-plugin-p2p \
-        --max-cache-size-mb=1024 --max-disk-usage-percent=90.0
+        --config=/etc/dnf/libdnf5-plugins/python_plugins_loader.d/p2p_plugin.conf \
+        --debug
 
 Then reload and restart:
 

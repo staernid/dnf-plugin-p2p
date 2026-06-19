@@ -7,6 +7,7 @@
 
 import argparse
 import logging
+import os
 import socket
 import sys
 import threading
@@ -411,10 +412,15 @@ class ThreadingHTTPServer(ThreadingMixIn, HTTPServer):
 def main():
     """Main entry point for the P2P proxy server."""
     # Hardcoded default values
+    try:
+        is_root = os.geteuid() == 0
+    except AttributeError:
+        is_root = False
+
     DEFAULT_HOST = "127.0.0.1"
     DEFAULT_PORT = 8888
-    DEFAULT_LIBP2P_PORT = 0
-    DEFAULT_CACHE_DIR = str(Path.home() / ".cache" / "dnf-plugin-p2p")
+    DEFAULT_LIBP2P_PORT = 8000
+    DEFAULT_CACHE_DIR = "/var/cache/dnf-plugin-p2p" if is_root else str(Path.home() / ".cache" / "dnf-plugin-p2p")
     DEFAULT_PEER_DISCOVERY_TIMEOUT = 2.0
     DEFAULT_MAX_PARALLEL_PEERS = 5
     DEFAULT_DEBUG = False
@@ -550,6 +556,13 @@ def main():
                             config_values["force_https"] = config.getboolean("p2p", "force_https")
                         except ValueError:
                             pass
+                    if config.has_option("p2p", "libp2p_port"):
+                        try:
+                            config_values["libp2p_port"] = config.getint("p2p", "libp2p_port")
+                        except ValueError:
+                            pass
+                    if config.has_option("p2p", "cache_dir"):
+                        config_values["cache_dir"] = config.get("p2p", "cache_dir")
                 break
             except Exception as e:
                 # Can't use logger yet because logging isn't set up
@@ -558,8 +571,8 @@ def main():
     # Merge configuration values
     host = args.host if args.host is not None else config_values.get("host", DEFAULT_HOST)
     port = args.port if args.port is not None else config_values.get("port", DEFAULT_PORT)
-    libp2p_port = args.libp2p_port if args.libp2p_port is not None else DEFAULT_LIBP2P_PORT
-    cache_dir = args.cache_dir if args.cache_dir is not None else DEFAULT_CACHE_DIR
+    libp2p_port = args.libp2p_port if args.libp2p_port is not None else config_values.get("libp2p_port", DEFAULT_LIBP2P_PORT)
+    cache_dir = args.cache_dir if args.cache_dir is not None else config_values.get("cache_dir", DEFAULT_CACHE_DIR)
     debug = args.debug if args.debug is not None else config_values.get("debug", DEFAULT_DEBUG)
     peer_discovery_timeout = args.peer_discovery_timeout if args.peer_discovery_timeout is not None else config_values.get("peer_discovery_timeout", DEFAULT_PEER_DISCOVERY_TIMEOUT)
     max_parallel_peers = args.max_parallel_peers if args.max_parallel_peers is not None else config_values.get("max_parallel_peers", DEFAULT_MAX_PARALLEL_PEERS)

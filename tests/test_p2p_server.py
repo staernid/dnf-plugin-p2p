@@ -121,12 +121,15 @@ def test_main_config_loading_and_override():
              "debug": "true",
              "max_cache_size_mb": "512",
              "max_disk_usage_percent": "80.0",
-             "force_https": "false"
+             "force_https": "false",
+             "libp2p_port": "7777",
+             "cache_dir": "/mock/cache"
          }[opt]), \
          patch("configparser.ConfigParser.getint", side_effect=lambda sec, opt: {
              "proxy_port": 9999,
              "max_parallel_peers": 12,
-             "max_cache_size_mb": 512
+             "max_cache_size_mb": 512,
+             "libp2p_port": 7777
          }[opt]), \
          patch("configparser.ConfigParser.getfloat", side_effect=lambda sec, opt: {
              "peer_discovery_timeout": 4.5,
@@ -148,12 +151,19 @@ def test_main_config_loading_and_override():
         # Since `--port` was not specified, it should fall back to config file "9999"
         # Since `--peer-discovery-timeout` was not specified, it should fall back to config file "4.5"
         # Since `--max-parallel-peers` was not specified, it should fall back to config file "12"
+        # Since `--libp2p-port` was not specified, it should fall back to config file "7777"
         mock_node_cls.assert_called_once_with(
-            libp2p_port=0,
+            libp2p_port=7777,
             local_http_port=9999,
             cache_lookup_callback=mock_cache_cls.return_value.lookup_filename,
             peer_discovery_timeout=4.5,
             max_parallel_peers=12
+        )
+
+        mock_cache_cls.assert_called_once_with(
+            Path("/mock/cache"),
+            max_cache_size_mb=512,
+            max_disk_usage_percent=80.0
         )
 
         mock_server_cls.assert_called_once_with(

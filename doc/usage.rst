@@ -87,10 +87,10 @@ Troubleshooting
     section.
 
 **Peers are discovered but connections fail**
-    Ensure the libp2p port is set to ``8000``
-    (``--libp2p-port=8000``) and the proxy binds to ``0.0.0.0``
-    (``--host=0.0.0.0``). See :doc:`configuration` for service override
-    instructions.
+    Ensure the libp2p port is set to ``8000`` (which is the default) and
+    the proxy is configured to bind to ``0.0.0.0`` (via ``proxy_host`` in
+    ``p2p_plugin.conf``) so it accepts incoming connections from the local
+    network. See :doc:`configuration` for details.
 
 **Metadata checksum errors (zchunk)**
     The plugin should automatically disable zchunk. If you see
