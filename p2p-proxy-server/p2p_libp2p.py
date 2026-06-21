@@ -109,14 +109,6 @@ class P2PLibp2pNode:
         if port <= 0:
             port = find_free_port()
         listen_addrs = get_available_interfaces(port)
-        # Ensure we explicitly listen on the IPv6 wildcard address
-        try:
-            ipv6_wildcard = multiaddr.Multiaddr(f"/ip6/::/tcp/{port}")
-            if ipv6_wildcard not in listen_addrs:
-                listen_addrs.append(ipv6_wildcard)
-                logger.info(f"Added IPv6 wildcard listener: /ip6/::/tcp/{port}")
-        except Exception as e:
-            logger.warning(f"Failed to add IPv6 wildcard listener: {e}")
 
         # Generate a stable-enough keypair for this session
         secret = secrets.token_bytes(32)

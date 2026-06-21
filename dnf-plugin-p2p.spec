@@ -118,6 +118,7 @@ python3 -m pip install \
 %{_bindir}/dnf-p2p-client
 %{_libexecdir}/%{name}/
 %{_unitdir}/dnf-p2p-proxy.service
+%dir %attr(0755, dnf-p2p, dnf-p2p) %{_localstatedir}/cache/dnf-plugin-p2p
 
 %pre proxy
 getent group dnf-p2p >/dev/null || groupadd -r dnf-p2p
@@ -128,6 +129,13 @@ exit 0
 
 %post proxy
 %systemd_post dnf-p2p-proxy.service
+# Fix ownership of existing cache directory and files if upgrading/installing
+if [ -d %{_localstatedir}/cache/dnf-plugin-p2p ]; then
+    chown -R dnf-p2p:dnf-p2p %{_localstatedir}/cache/dnf-plugin-p2p || :
+    if [ -x /usr/sbin/restorecon ]; then
+        /usr/sbin/restorecon -R %{_localstatedir}/cache/dnf-plugin-p2p || :
+    fi
+fi
 
 %preun proxy
 %systemd_preun dnf-p2p-proxy.service
