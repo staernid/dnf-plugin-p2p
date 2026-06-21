@@ -16,14 +16,17 @@ libdnf5_mock = MagicMock()
 libdnf5_plugin_mock = MagicMock()
 libdnf5_plugin_mock.IPlugin = MockIPlugin
 libdnf5_base_mock = MagicMock()
+libdnf5_rpm_mock = MagicMock()
 
 # Set up submodule attributes on parent mock for dotted import resolution
 libdnf5_mock.plugin = libdnf5_plugin_mock
 libdnf5_mock.base = libdnf5_base_mock
+libdnf5_mock.rpm = libdnf5_rpm_mock
 
 sys.modules['libdnf5'] = libdnf5_mock
 sys.modules['libdnf5.plugin'] = libdnf5_plugin_mock
 sys.modules['libdnf5.base'] = libdnf5_base_mock
+sys.modules['libdnf5.rpm'] = libdnf5_rpm_mock
 
 # Add plugins dir to sys.path
 if "plugins" not in sys.path:

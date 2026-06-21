@@ -62,9 +62,13 @@ def test_http_handler_peer_fallback(test_server):
     server, port, mock_cache, mock_node = test_server
     mock_cache.get_cached_file_by_name.return_value = None
     
+    # Calculate expected hash of b"chunk1chunk2"
+    import hashlib
+    expected_hash = hashlib.sha256(b"chunk1chunk2").hexdigest()
+
     # Package does not exist locally
     mock_node.query_peers_for_package.return_value = [
-        {"ip": "192.168.1.100", "port": 8888, "hash": "somehash", "size": 100}
+        {"ip": "192.168.1.100", "port": 8888, "hash": expected_hash, "size": 100}
     ]
     
     # Mock requests.get to return a successful download from peer
@@ -79,15 +83,20 @@ def test_http_handler_peer_fallback(test_server):
          patch("requests.get", return_value=mock_response) as mock_get, \
          patch("builtins.open", mock_open()):
         
-        # Trigger download from peer
-        url = f"http://127.0.0.1:{port}/packages/test-package.rpm"
-        response = urllib.request.urlopen(url, timeout=1)
-        assert response.getcode() == 200
-        assert response.read() == b"chunk1chunk2"
-            
-        # Assert that it queried the libp2p node and tried to download from the peer
-        mock_node.query_peers_for_package.assert_called_with("test-package.rpm")
-        mock_get.assert_any_call("http://192.168.1.100:8888/packages/test-package.rpm", stream=True, timeout=15)
+        # Register expected hash in the handler first
+        P2PProxyHandler.expected_hashes["test-package.rpm"] = expected_hash
+        try:
+            # Trigger download from peer
+            url = f"http://127.0.0.1:{port}/packages/test-package.rpm"
+            response = urllib.request.urlopen(url, timeout=1)
+            assert response.getcode() == 200
+            assert response.read() == b"chunk1chunk2"
+                
+            # Assert that it queried the libp2p node and tried to download from the peer
+            mock_node.query_peers_for_package.assert_called_with("test-package.rpm")
+            mock_get.assert_any_call("http://192.168.1.100:8888/packages/test-package.rpm", stream=True, timeout=15)
+        finally:
+            P2PProxyHandler.expected_hashes.pop("test-package.rpm", None)
 
 
 def test_main_config_loading_and_override():
@@ -229,5 +238,89 @@ def test_http_handler_force_https_disabled(test_server):
             
         # Assert that requests.get was called with the original HTTP url
         mock_get.assert_any_call("http://mirror.foo.com/packages/test-package.rpm", stream=True, timeout=15)
+
+
+def test_http_handler_remote_client_denied(test_server):
+    server, port, mock_cache, mock_node = test_server
+    with patch.object(P2PProxyHandler, "_is_local_client", return_value=False):
+        # Remote client tries to access non-packages path
+        url = f"http://127.0.0.1:{port}/invalid-path"
+        with pytest.raises(urllib.error.HTTPError) as excinfo:
+            urllib.request.urlopen(url, timeout=1)
+        assert excinfo.value.code == 403
+        
+        # Remote client tries to access with remote_url parameter
+        url = f"http://127.0.0.1:{port}/packages/test.rpm?remote_url=http://unsafe.com"
+        with pytest.raises(urllib.error.HTTPError) as excinfo:
+            urllib.request.urlopen(url, timeout=1)
+        assert excinfo.value.code == 403
+
+        # Remote client requests uncached package
+        mock_cache.get_cached_file_by_name.return_value = None
+        url = f"http://127.0.0.1:{port}/packages/uncached.rpm"
+        with pytest.raises(urllib.error.HTTPError) as excinfo:
+            urllib.request.urlopen(url, timeout=1)
+        assert excinfo.value.code == 404
+
+
+def test_http_handler_expected_hash_mismatch(test_server):
+    server, port, mock_cache, mock_node = test_server
+    mock_cache.get_cached_file_by_name.return_value = None
+    
+    # Mock requests.get to return chunk1, chunk2 (which doesn't match the expected_hash)
+    mock_response = MagicMock()
+    mock_response.status_code = 200
+    mock_response.headers = {"Content-Length": "12"}
+    mock_response.iter_content.return_value = [b"chunk1", b"chunk2"]
+
+    from unittest.mock import mock_open
+    with patch.object(Path, "exists", return_value=True), \
+         patch.object(Path, "rename") as mock_rename, \
+         patch.object(Path, "unlink") as mock_unlink, \
+         patch("requests.get", return_value=mock_response) as mock_get, \
+         patch("builtins.open", mock_open()):
+        
+        P2PProxyHandler.expected_hashes["bad-package.rpm"] = "wrong_hash_value"
+        try:
+            url = f"http://127.0.0.1:{port}/packages/bad-package.rpm?remote_url=http://mirror.foo.com/bad-package.rpm"
+            response = urllib.request.urlopen(url, timeout=1)
+            assert response.read() == b"chunk1chunk2"
+            
+            # Since hash verification failed, it should not rename or add to cache
+            mock_rename.assert_not_called()
+            mock_cache.add_to_cache.assert_not_called()
+            # It should unlink the temp file
+            mock_unlink.assert_called_once()
+        finally:
+            P2PProxyHandler.expected_hashes.pop("bad-package.rpm", None)
+
+
+def test_http_handler_cache_corruption_eviction(test_server):
+    server, port, mock_cache, mock_node = test_server
+    
+    # Package is supposedly cached
+    cached_file = Path("/tmp/mock_cache_dir/corrupted.rpm")
+    mock_cache.get_cached_file_by_name.return_value = cached_file
+    
+    # Mock get_file_hash to return incorrect hash
+    mock_cache.get_file_hash.return_value = "incorrect_hash"
+    
+    # Register a correct expected hash
+    P2PProxyHandler.expected_hashes["corrupted.rpm"] = "correct_hash"
+    
+    # Mock requests.get fallback
+    mock_response = MagicMock()
+    mock_response.status_code = 404
+    
+    with patch.object(Path, "unlink") as mock_unlink, \
+         patch("requests.get", return_value=mock_response):
+        
+        url = f"http://127.0.0.1:{port}/packages/corrupted.rpm"
+        with pytest.raises(urllib.error.HTTPError) as excinfo:
+            urllib.request.urlopen(url, timeout=1)
+        
+        # Unlink should be called to evict the corrupted package from disk
+        mock_unlink.assert_called_once()
+        P2PProxyHandler.expected_hashes.pop("corrupted.rpm", None)
 
 

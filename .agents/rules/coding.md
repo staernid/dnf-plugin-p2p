@@ -1,5 +1,5 @@
 ---
-trigger: model_decision
+trigger: always_on
 description: Code quality, concurrency, testing, and performance guidelines for the dnf-plugin-p2p repository.
 ---
 

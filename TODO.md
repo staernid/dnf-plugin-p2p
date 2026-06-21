@@ -103,3 +103,13 @@ if remote_url and remote_url.startswith("http://"):
 * **The fix:** Correctly mock the file opener using `mock_open` (e.g., `mock_open(read_data=b"mock-rpm-bytes")`) and assert the response body content in the test.
 
 ---
+
+### 10. [DONE] Security Vulnerability Remediation
+We have completed a comprehensive security audit and remediation:
+* **HTTP Access Control**: Restricted `do_GET`, `do_HEAD`, and `do_POST` handlers in `p2p_server.py` to authorized origins. Localhost-only is enforced for control/mirror paths, and remote LAN peers are only allowed to fetch packages from `/packages/` without using the `remote_url` parameter.
+* **SSRF Mitigation**: Prevented remote peer requests from passing the `remote_url` query parameter.
+* **Cryptographic Integrity Verification**: Implemented expected hash registration via a new `POST /expected_hashes` handler. The DNF plugin registers expected hashes when a transaction is resolved. The proxy validates downloads from peers on-the-fly and automatically unlinks temporary files on mismatch, completely preventing cache poisoning.
+* **Cache Corruption Self-Healing**: Cached packages are verified against the registered expected hash before serving, automatically evicting corrupt files and falling back to the mirror.
+* **Systemd Privilege Demotion**: Added a dedicated system user/group `dnf-p2p` in the RPM spec file and configured systemd to execute the daemon under this unprivileged user.
+
+---

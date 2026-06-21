@@ -6,6 +6,7 @@
 #
 
 import argparse
+import hashlib
 import logging
 import os
 import socket
@@ -39,6 +40,15 @@ class P2PProxyHandler(BaseHTTPRequestHandler):
     cache: P2PCache = None
     libp2p_node: P2PLibp2pNode = None
     force_https: bool = True
+
+    # Map of filename -> expected_hash registered by local DNF instances
+    expected_hashes = {}
+    expected_hashes_lock = threading.Lock()
+
+    def _is_local_client(self) -> bool:
+        """Check if the client is local (loopback)."""
+        ip = self.client_address[0]
+        return ip == "127.0.0.1" or ip == "::1" or ip.startswith("127.")
 
     def do_CONNECT(self):
         """Handle HTTP CONNECT requests to tunnel HTTPS traffic."""
@@ -95,10 +105,51 @@ class P2PProxyHandler(BaseHTTPRequestHandler):
             except Exception:
                 pass
 
+    def do_POST(self):
+        """Handle POST requests (e.g., registering expected hashes from local DNF)."""
+        try:
+            if not self._is_local_client():
+                logger.warning(f"Rejected remote POST request from {self.client_address[0]}")
+                self.send_error(403, "Access Denied: POST only allowed from localhost")
+                return
+
+            parsed_path = urllib.parse.urlparse(self.path)
+            if parsed_path.path == "/expected_hashes":
+                content_length = int(self.headers.get('Content-Length', 0))
+                if content_length > 0:
+                    post_data = self.rfile.read(content_length)
+                    import json
+                    try:
+                        hashes = json.loads(post_data.decode('utf-8'))
+                        if isinstance(hashes, dict):
+                            with P2PProxyHandler.expected_hashes_lock:
+                                P2PProxyHandler.expected_hashes.update(hashes)
+                            logger.info(f"Registered {len(hashes)} expected hashes from local client")
+                            self.send_response(200)
+                            self.send_header("Content-Type", "text/plain")
+                            self.send_header("Content-Length", "2")
+                            self.end_headers()
+                            self.wfile.write(b"OK")
+                            return
+                    except Exception as e:
+                        logger.error(f"Failed to parse expected hashes JSON: {e}")
+                
+                self.send_error(400, "Bad Request")
+                return
+            
+            self.send_error(404, "Not Found")
+        except Exception as e:
+            logger.error(f"Error handling POST: {e}")
+            try:
+                self.send_error(500, f"Internal Server Error: {e}")
+            except Exception:
+                pass
+
     def do_GET(self):
         """Handle GET requests for packages and metadata."""
         try:
             parsed_path = urllib.parse.urlparse(self.path)
+            is_local = self._is_local_client()
             
             # Health check endpoint to verify proxy identity/status
             if parsed_path.path == "/ping":
@@ -111,6 +162,18 @@ class P2PProxyHandler(BaseHTTPRequestHandler):
                 except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError) as e:
                     raise ClientDisconnected() from e
                 return
+
+            # Authorize remote clients
+            if not is_local:
+                if not parsed_path.path.startswith("/packages/"):
+                    logger.warning(f"Rejected unauthorized remote request to path: {parsed_path.path}")
+                    self.send_error(403, "Access Denied: Path not allowed")
+                    return
+                query_params = urllib.parse.parse_qs(parsed_path.query)
+                if "remote_url" in query_params:
+                    logger.warning(f"Rejected remote request containing remote_url parameter from {self.client_address[0]}")
+                    self.send_error(403, "Access Denied: remote_url query parameter not allowed")
+                    return
 
             filename = Path(parsed_path.path).name
             logger.info(f"GET request for {filename}")
@@ -137,11 +200,50 @@ class P2PProxyHandler(BaseHTTPRequestHandler):
                     self.send_error(404, f"File {filename} not found and no remote_url specified.")
                 return
 
+            # Retrieve expected hash if registered by local DNF
+            with P2PProxyHandler.expected_hashes_lock:
+                expected_hash = P2PProxyHandler.expected_hashes.get(filename)
+
             # 1. Check if package is in local cache
             cache_file = self.cache.get_cached_file_by_name(filename)
             if cache_file:
-                logger.info(f"Serving {filename} from local cache")
-                self._serve_file(cache_file)
+                # If we have a registered expected hash, verify the cache integrity
+                if expected_hash:
+                    cached_hash = self.cache.get_file_hash(cache_file)
+                    if cached_hash != expected_hash:
+                        logger.warning(f"Cache corruption detected for {filename}. Expected {expected_hash}, got {cached_hash}. Evicting.")
+                        try:
+                            cache_file.unlink()
+                            # Evict from index in memory
+                            with self.cache.lock:
+                                for h_key, info in list(self.cache.index.items()):
+                                    if info.get("filename") == filename:
+                                        del self.cache.index[h_key]
+                                self.cache._save_cache_index()
+                        except Exception as e:
+                            logger.error(f"Failed to evict corrupt cache file: {e}")
+                        cache_file = None
+
+                if cache_file:
+                    logger.info(f"Serving {filename} from local cache")
+                    self._serve_file(cache_file)
+                    return
+
+            # For remote clients, if the package is not in cache, return 404 immediately.
+            # Remote clients cannot trigger peer searches or mirror downloads.
+            if not is_local:
+                logger.info(f"Remote client request for uncached package {filename} returned 404")
+                self.send_error(404, f"File {filename} not found in local cache.")
+                return
+
+            # For local clients, if expected_hash is not registered, bypass P2P downloads to prevent
+            # caching/serving unverified peer content. Fallback directly to the remote mirror.
+            if not expected_hash:
+                logger.warning(f"Bypassing P2P for local request {filename}: no registered expected hash found")
+                if remote_url:
+                    if self._download_and_serve(remote_url, filename, expected_hash=None):
+                        return
+                self.send_error(404, f"File {filename} not found in cache and no expected hash registered.")
                 return
 
             # 2. Query peers for the package
@@ -152,14 +254,15 @@ class P2PProxyHandler(BaseHTTPRequestHandler):
                     peer_port = peer["port"]
                     peer_url = f"http://{peer_ip}:{peer_port}/packages/{filename}"
                     logger.info(f"Attempting to download {filename} from peer {peer_ip}:{peer_port}")
-                    if self._download_and_serve(peer_url, filename):
+                    # Enforce the trusted expected_hash
+                    if self._download_and_serve(peer_url, filename, expected_hash=expected_hash):
                         return
                 logger.warning(f"Failed to fetch {filename} from any peers. Falling back to remote mirror.")
 
             # 3. Fallback to remote mirror
             if remote_url:
                 logger.info(f"Downloading {filename} from remote mirror: {remote_url}")
-                if self._download_and_serve(remote_url, filename):
+                if self._download_and_serve(remote_url, filename, expected_hash=expected_hash):
                     return
             
             self.send_error(404, f"File {filename} not found locally, on peers, or no remote_url specified.")
@@ -168,55 +271,73 @@ class P2PProxyHandler(BaseHTTPRequestHandler):
 
     def do_HEAD(self):
         """Handle HEAD requests."""
-        parsed_path = urllib.parse.urlparse(self.path)
-        
-        # Health check endpoint
-        if parsed_path.path == "/ping":
-            self.send_response(200)
-            self.send_header("Content-Type", "text/plain")
-            self.send_header("Content-Length", "4")
-            self.end_headers()
-            return
-
-        filename = Path(parsed_path.path).name
-
-        
-        # Parse remote URL from parameters
-        query_params = urllib.parse.parse_qs(parsed_path.query)
-        remote_url = query_params.get("remote_url", [None])[0]
-        if not remote_url and (self.path.startswith("http://") or self.path.startswith("https://")):
-            remote_url = self.path
-
-        # Automatically upgrade HTTP mirror URLs to HTTPS to secure internet traffic
-        if self.force_https and remote_url and remote_url.startswith("http://"):
-            parsed_remote = urllib.parse.urlparse(remote_url)
-            if parsed_remote.hostname not in ("127.0.0.1", "localhost"):
-                remote_url = remote_url.replace("http://", "https://", 1)
-
-        # Check local cache (only if it is a package file)
-        if filename.endswith((".rpm", ".drpm")):
-            cache_file = self.cache.get_cached_file_by_name(filename)
-            if cache_file:
+        try:
+            parsed_path = urllib.parse.urlparse(self.path)
+            is_local = self._is_local_client()
+            
+            # Health check endpoint
+            if parsed_path.path == "/ping":
                 self.send_response(200)
-                self.send_header("Content-Type", "application/x-redhat-package-manager")
-                self.send_header("Content-Length", str(cache_file.stat().st_size))
+                self.send_header("Content-Type", "text/plain")
+                self.send_header("Content-Length", "4")
                 self.end_headers()
                 return
 
-        # Fallback to remote URL for metadata
-        if remote_url:
-            try:
-                response = requests.head(remote_url, timeout=5)
-                self.send_response(response.status_code)
-                for header, value in response.headers.items():
-                    if header.lower() in ["content-length", "content-type", "last-modified"]:
-                        self.send_header(header, value)
-                self.end_headers()
+            # Authorize remote clients
+            if not is_local:
+                if not parsed_path.path.startswith("/packages/"):
+                    self.send_error(403, "Access Denied: Path not allowed")
+                    return
+                query_params = urllib.parse.parse_qs(parsed_path.query)
+                if "remote_url" in query_params:
+                    self.send_error(403, "Access Denied: remote_url not allowed")
+                    return
+
+            filename = Path(parsed_path.path).name
+
+            # Parse remote URL from parameters
+            query_params = urllib.parse.parse_qs(parsed_path.query)
+            remote_url = query_params.get("remote_url", [None])[0]
+            if not remote_url and (self.path.startswith("http://") or self.path.startswith("https://")):
+                remote_url = self.path
+
+            # Automatically upgrade HTTP mirror URLs to HTTPS to secure internet traffic
+            if self.force_https and remote_url and remote_url.startswith("http://"):
+                parsed_remote = urllib.parse.urlparse(remote_url)
+                if parsed_remote.hostname not in ("127.0.0.1", "localhost"):
+                    remote_url = remote_url.replace("http://", "https://", 1)
+
+            # Check local cache (only if it is a package file)
+            if filename.endswith((".rpm", ".drpm")):
+                cache_file = self.cache.get_cached_file_by_name(filename)
+                if cache_file:
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/x-redhat-package-manager")
+                    self.send_header("Content-Length", str(cache_file.stat().st_size))
+                    self.end_headers()
+                    return
+
+            # For remote clients, if package is not in cache, return 404 directly
+            if not is_local:
+                self.send_error(404, "File Not Found in Cache")
                 return
-            except Exception as e:
-                logger.error(f"Error handling HEAD for remote: {e}")
-        
-        self.send_error(404, "File Not Found")
+
+            # Fallback to remote URL for metadata
+            if remote_url:
+                try:
+                    response = requests.head(remote_url, timeout=5)
+                    self.send_response(response.status_code)
+                    for header, value in response.headers.items():
+                        if header.lower() in ["content-length", "content-type", "last-modified"]:
+                            self.send_header(header, value)
+                    self.end_headers()
+                    return
+                except Exception as e:
+                    logger.error(f"Error handling HEAD for remote: {e}")
+            
+            self.send_error(404, "File Not Found")
+        except Exception as e:
+            logger.error(f"Error in do_HEAD: {e}")
 
     def _serve_file(self, file_path: Path):
         """Helper to serve a file from disk."""
@@ -312,7 +433,7 @@ class P2PProxyHandler(BaseHTTPRequestHandler):
             logger.error(f"Error streaming from {url}: {e}")
             return False
 
-    def _download_and_serve(self, url: str, filename: str) -> bool:
+    def _download_and_serve(self, url: str, filename: str, expected_hash: Optional[str] = None) -> bool:
         """Download file from URL, stream it to client, and save to cache."""
         temp_file = self.cache.cache_dir / f"{filename}.tmp"
         success = False
@@ -331,6 +452,7 @@ class P2PProxyHandler(BaseHTTPRequestHandler):
             except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError) as e:
                 raise ClientDisconnected() from e
 
+            hasher = hashlib.sha256()
             with open(temp_file, 'wb') as tmp_f:
                 for chunk in response.iter_content(chunk_size=65536):
                     if chunk:
@@ -339,6 +461,13 @@ class P2PProxyHandler(BaseHTTPRequestHandler):
                         except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError) as e:
                             raise ClientDisconnected() from e
                         tmp_f.write(chunk)
+                        hasher.update(chunk)
+            
+            downloaded_hash = hasher.hexdigest()
+            if expected_hash and downloaded_hash != expected_hash:
+                logger.warning(f"Hash mismatch for downloaded file {filename}: expected {expected_hash}, got {downloaded_hash}")
+                raise ClientDisconnected("Hash mismatch detected")
+
             success = True
             return True
         except ClientDisconnected:
@@ -352,7 +481,7 @@ class P2PProxyHandler(BaseHTTPRequestHandler):
                 try:
                     temp_file.rename(final_file)
                     # Add to cache index
-                    self.cache.add_to_cache(final_file, None, {"source": url})
+                    self.cache.add_to_cache(final_file, expected_hash or downloaded_hash, {"source": url})
                     logger.info(f"Successfully cached {filename}")
                 except Exception as e:
                     logger.error(f"Failed to register {filename} in cache: {e}")

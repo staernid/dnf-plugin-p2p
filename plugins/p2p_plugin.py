@@ -18,6 +18,7 @@
 import libdnf5
 import libdnf5.plugin
 import libdnf5.base
+import libdnf5.rpm
 import subprocess
 import sys
 import logging
@@ -45,8 +46,6 @@ class Plugin(libdnf5.plugin.IPlugin):
         self.enabled = False
         self.debug = False
         self.cache_enabled = True
-        self.multicast_group = "224.0.0.1"
-        self.multicast_port = 5353
 
     def _print(self, message):
         """Print message to stderr only if debug mode is enabled."""
@@ -158,12 +157,6 @@ class Plugin(libdnf5.plugin.IPlugin):
                 
                 if config.has_option("p2p", "cache_enabled"):
                     self.cache_enabled = config.getboolean("p2p", "cache_enabled")
-                
-                if config.has_option("p2p", "multicast_group"):
-                    self.multicast_group = config.get("p2p", "multicast_group")
-                
-                if config.has_option("p2p", "multicast_port"):
-                    self.multicast_port = config.getint("p2p", "multicast_port")
         except Exception as e:
             logger.warning(f"P2P Sharing Plugin: Failed to load configuration: {e}")
 
@@ -271,8 +264,66 @@ class Plugin(libdnf5.plugin.IPlugin):
 
 
     def goal_resolved(self, transaction):
-        """Hook called when a goal is resolved."""
-        pass
+        """Hook called when a goal is resolved. Collects expected hashes of target packages
+        and registers them with the local proxy server."""
+        if not self.enabled:
+            return True
+            
+        try:
+            expected_hashes = {}
+            packages = transaction.get_packages()
+            
+            for pkg in packages:
+                # pkg is libdnf5.transaction.Package
+                name = pkg.get_name()
+                version = pkg.get_version()
+                release = pkg.get_release()
+                arch = pkg.get_arch()
+                epoch = pkg.get_epoch()
+                repoid = pkg.get_repoid()
+                
+                # Query base packages to get the checksum and location
+                query = libdnf5.rpm.PackageQuery(self.base)
+                query.filter_name(name)
+                query.filter_version(version)
+                query.filter_release(release)
+                query.filter_arch(arch)
+                query.filter_epoch(epoch)
+                query.filter_repo_id(repoid)
+                
+                for rpm_pkg in query:
+                    loc = rpm_pkg.get_location()
+                    if loc:
+                        filename = Path(loc).name
+                        checksum_obj = rpm_pkg.get_checksum()
+                        if checksum_obj:
+                            h = checksum_obj.get_checksum()
+                            t = checksum_obj.get_type_str()
+                            if t == "sha256":
+                                expected_hashes[filename] = h
+            
+            if expected_hashes:
+                # Send the expected hashes to the local proxy server
+                import json
+                import urllib.request
+                url = f"http://{self.proxy_host}:{self.proxy_port}/expected_hashes"
+                data = json.dumps(expected_hashes).encode("utf-8")
+                req = urllib.request.Request(
+                    url, data=data, 
+                    headers={"Content-Type": "application/json"},
+                    method="POST"
+                )
+                try:
+                    with urllib.request.urlopen(req, timeout=1.0) as response:
+                        if response.status == 200:
+                            self._print(f">>> Registered {len(expected_hashes)} expected package hashes with P2P proxy <<<")
+                            logger.info(f"P2P Sharing Plugin: Registered {len(expected_hashes)} package hashes with proxy")
+                except Exception as e:
+                    logger.warning(f"P2P Sharing Plugin: Failed to register expected hashes with proxy: {e}")
+        except Exception as e:
+            logger.error(f"P2P Sharing Plugin: Error in goal_resolved hook: {e}", exc_info=True)
+            
+        return True
 
     def finish(self):
         """Plugin cleanup — proxy daemon is intentionally left running across DNF5 invocations."""

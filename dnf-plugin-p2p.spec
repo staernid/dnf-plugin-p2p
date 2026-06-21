@@ -118,6 +118,13 @@ python3 -m pip install \
 %{_libexecdir}/%{name}/
 %{_unitdir}/dnf-p2p-proxy.service
 
+%pre proxy
+getent group dnf-p2p >/dev/null || groupadd -r dnf-p2p
+getent passwd dnf-p2p >/dev/null || \
+    useradd -r -g dnf-p2p -d /var/cache/dnf-plugin-p2p -s /sbin/nologin \
+    -c "System user for DNF P2P Package Sharing Proxy" dnf-p2p
+exit 0
+
 %post proxy
 %systemd_post dnf-p2p-proxy.service
 

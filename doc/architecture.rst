@@ -58,6 +58,13 @@ The plugin uses several libdnf5 hooks to set up the P2P pipeline:
       modified on disk). This forces DNF to send plaintext ``GET`` requests
       through the proxy instead of opaque ``CONNECT`` tunnels.
 
+``goal_resolved``
+    Once the transaction goals are resolved, the plugin queries the package database
+    for the expected SHA-256 checksums of all packages scheduled to be downloaded.
+    These expected hashes are then registered with the proxy server via a local
+    ``POST /expected_hashes`` API call to establish a cryptographically secure
+    trust expectation.
+
 
 HTTPS Handling
 --------------
@@ -138,3 +145,15 @@ When DNF requests an ``.rpm`` or ``.drpm`` file through the proxy:
 
 Non-package files (metadata, repodata) are streamed directly from the
 upstream mirror without caching or peer querying.
+
+
+Security & Package Integrity
+----------------------------
+
+To prevent cache poisoning, Server-Side Request Forgery (SSRF), and unauthorized LAN access, the proxy server implements the following security controls:
+
+- **Localhost Control Locking**: HTTP operations modifying proxy state (such as registering expected hashes via ``POST /expected_hashes``) are strictly locked to the loopback interface (``127.0.0.1`` / ``::1``). Remote requests to these paths are rejected with HTTP 403 Forbidden.
+- **SSRF Mitigation**: Remote clients requesting package downloads via the proxy are not permitted to pass a ``remote_url`` parameter, ensuring the proxy cannot be used as an open internet gateway or for internal port scanning.
+- **Cryptographic Verification**: During peer or mirror downloads, the proxy computes the SHA-256 hash of the received stream on-the-fly. If the hash does not match the expected hash registered by the local DNF transaction, the download is immediately aborted, and the temporary file is unlinked.
+- **Self-Healing Cache Validation**: Before serving a package from the local cache, the proxy validates the file's hash against the registered expected hash. If corruption or tampering is detected, the file is automatically evicted from the disk and the cache index, forcing a clean fallback download.
+- **Privilege Demotion**: The background proxy daemon runs as an unprivileged system user (``dnf-p2p``) to adhere to the principle of least privilege.
