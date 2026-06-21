@@ -17,7 +17,20 @@ def test_extract_ip():
     # Should fallback to loopback
     assert extract_ip(addrs_loopback) == "127.0.0.1"
 
-    # Should return None if no IPv4 address is present
+    # Test IPv6 address extraction
+    addrs_ipv6 = [
+        "/ip6/::1/tcp/8000",
+        "/ip6/2001:db8::1/tcp/8000",
+    ]
+    # Should prefer non-loopback IPv6
+    assert extract_ip(addrs_ipv6) == "2001:db8::1"
+
+    addrs_ipv6_loopback = [
+        "/ip6/::1/tcp/8000",
+    ]
+    assert extract_ip(addrs_ipv6_loopback) == "::1"
+
+    # Should return None if no address is present
     assert extract_ip([]) is None
 
 def test_node_init():

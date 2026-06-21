@@ -1,7 +1,7 @@
 Architecture
 ============
 
-The ``dnf-plugin-p2p`` system consists of two primary layers:
+The ``dnf-plugin-p2p`` system consists of three primary components:
 
 1. **libdnf5 Plugin** (``plugins/p2p_plugin.py``): Integrates with the DNF5
    lifecycle, starting the proxy and injecting proxy configuration into
@@ -9,6 +9,9 @@ The ``dnf-plugin-p2p`` system consists of two primary layers:
 2. **P2P Proxy Daemon** (``p2p-proxy-server/``): Multi-threaded HTTP proxy
    utilizing ``py-libp2p`` and mDNS to cache and share packages on local
    networks.
+3. **Diagnostics CLI Client** (``dnf-p2p-client``): A command-line utility
+   for administrators to check the status, caching efficiency, and network
+   activity of the proxy daemon.
 
 
 Data Flow
@@ -157,3 +160,23 @@ To prevent cache poisoning, Server-Side Request Forgery (SSRF), and unauthorized
 - **Cryptographic Verification**: During peer or mirror downloads, the proxy computes the SHA-256 hash of the received stream on-the-fly. If the hash does not match the expected hash registered by the local DNF transaction, the download is immediately aborted, and the temporary file is unlinked.
 - **Self-Healing Cache Validation**: Before serving a package from the local cache, the proxy validates the file's hash against the registered expected hash. If corruption or tampering is detected, the file is automatically evicted from the disk and the cache index, forcing a clean fallback download.
 - **Privilege Demotion**: The background proxy daemon runs as an unprivileged system user (``dnf-p2p``) to adhere to the principle of least privilege.
+
+
+Diagnostics & Observability
+---------------------------
+
+The proxy daemon exposes local-only GET endpoints at ``/stats`` and ``/status``:
+
+- Access is strictly restricted to loopback clients (``127.0.0.1`` / ``::1``) to prevent exposing metrics to the network.
+- Returns JSON metadata including cache hit/miss counts, cache hit ratio, total cache size on disk, active/discovered libp2p peers, and cumulative bandwidth saved.
+- Administrators can query these statistics in a user-friendly format using the ``dnf-p2p-client`` command-line tool.
+
+
+IPv6 Support
+------------
+
+Zero-configuration LAN discovery and transfers fully support dual-stack and IPv6-only environments:
+
+- The libp2p node listens on both IPv4 and IPv6 network interfaces, including the IPv6 wildcard address ``/ip6/::/tcp/<port>``.
+- During peer discovery, the mDNS protocol broadcasts and resolves both IPv4 and IPv6 peer addresses.
+- The address extraction mechanism automatically identifies reachable IPv6 addresses, wrapping them in square brackets (e.g., ``http://[2001:db8::1]:8888/``) to generate valid HTTP URLs for package transfers.

@@ -115,6 +115,7 @@ python3 -m pip install \
 %{python3_sitelib}/libdnf_p2p_sharing/
 
 %files proxy
+%{_bindir}/dnf-p2p-client
 %{_libexecdir}/%{name}/
 %{_unitdir}/dnf-p2p-proxy.service
 

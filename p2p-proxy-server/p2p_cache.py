@@ -11,6 +11,9 @@ import threading
 from pathlib import Path
 from typing import Optional, Dict, List
 import os
+import json
+import time
+import shutil
 
 logger = logging.getLogger(__name__)
 
@@ -39,13 +42,11 @@ class P2PCache:
         try:
             index_file = self.cache_dir / ".p2p_index"
             if index_file.exists():
-                import json
                 with self.lock:
                     with open(index_file, 'r') as f:
                         self.index = json.load(f)
                 
                 # Check and populate missing metadata for integrity
-                import time
                 modified = False
                 with self.lock:
                     for package_hash, info in list(self.index.items()):
@@ -81,7 +82,6 @@ class P2PCache:
     def _save_cache_index(self) -> None:
         """Save the cache index to disk."""
         try:
-            import json
             index_file = self.cache_dir / ".p2p_index"
             with self.lock:
                 with open(index_file, 'w') as f:
@@ -137,12 +137,10 @@ class P2PCache:
             # Copy to cache
             cache_file = self.cache_dir / file_path.name
             if not cache_file.exists():
-                import shutil
                 shutil.copy2(file_path, cache_file)
                 logger.debug(f"Added to cache: {cache_file}")
             
             # Update index
-            import time
             with self.lock:
                 self.index[file_hash] = {
                     "filename": file_path.name,
@@ -166,7 +164,6 @@ class P2PCache:
         Returns:
             Path to the cached file, or None if not found
         """
-        import time
         with self.lock:
             if package_hash in self.index:
                 filename = self.index[package_hash].get("filename")
@@ -191,7 +188,6 @@ class P2PCache:
         Returns:
             Path to the cached file, or None if not found
         """
-        import time
         with self.lock:
             for package_hash, info in self.index.items():
                 if info.get("filename") == filename:
@@ -229,7 +225,6 @@ class P2PCache:
         Returns:
             Dict containing 'hash' and 'size' if found, else None
         """
-        import time
         with self.lock:
             for package_hash, info in list(self.index.items()):
                 if info.get("filename") == filename:
@@ -272,7 +267,6 @@ class P2PCache:
     def get_disk_usage_percent(self) -> float:
         """Get the disk usage percentage of the file system containing cache_dir."""
         try:
-            import shutil
             usage = shutil.disk_usage(self.cache_dir)
             return (usage.used / usage.total) * 100.0
         except Exception as e:

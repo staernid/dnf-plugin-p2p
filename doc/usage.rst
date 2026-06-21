@@ -48,6 +48,42 @@ How It Works (User Perspective)
    via P2P to prevent staleness or signature issues.
 
 
+Monitoring Daemon Status & Statistics
+-------------------------------------
+
+A command-line client ``dnf-p2p-client`` is provided to check the state, cache metrics, peer connections, and bandwidth savings of the running P2P proxy daemon.
+
+To view status:
+
+.. code-block:: bash
+
+    dnf-p2p-client status
+
+Example Output:
+
+.. code-block:: text
+
+    ==================================================
+               DNF P2P Daemon State & Stats
+    ==================================================
+    Proxy Address:         http://127.0.0.1:8888
+    Cache Hits:            15
+    Cache Misses:          8
+    Cache Hit Ratio:       65.22% (Total requests: 23)
+    Cache Size on Disk:    124.50 MB
+    Discovered Peers:      3
+    Active P2P Connections: 2
+    Bandwidth Saved:       87.20 MB
+    ==================================================
+
+You can customize the host, port, or configuration file path if the daemon is running on non-default settings:
+
+.. code-block:: bash
+
+    dnf-p2p-client --host 127.0.0.1 --port 8888 status
+    dnf-p2p-client --config /path/to/p2p_plugin.conf status
+
+
 Verifying P2P Operations
 -------------------------
 

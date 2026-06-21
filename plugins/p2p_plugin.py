@@ -19,10 +19,16 @@ import libdnf5
 import libdnf5.plugin
 import libdnf5.base
 import libdnf5.rpm
+import libdnf5.conf
 import subprocess
 import sys
 import logging
+import socket
+import os
+import json
+import urllib.request
 from pathlib import Path
+from configparser import ConfigParser
 
 logger = logging.getLogger(__name__)
 
@@ -55,7 +61,6 @@ class Plugin(libdnf5.plugin.IPlugin):
     @staticmethod
     def get_api_version():
         """Return the plugin API version."""
-        import libdnf5.conf
         v = libdnf5.conf.PluginAPIVersion()
         v.major = 2
         v.minor = 1
@@ -132,7 +137,6 @@ class Plugin(libdnf5.plugin.IPlugin):
         ]
         
         try:
-            from configparser import ConfigParser
             config = ConfigParser()
             
             for config_path in config_paths:
@@ -162,7 +166,6 @@ class Plugin(libdnf5.plugin.IPlugin):
 
     def _start_proxy_server(self):
         """Ensure the P2P proxy systemd service is active."""
-        import socket
         try:
             # Check if proxy is already active and listening
             with socket.create_connection((self.proxy_host, self.proxy_port), timeout=0.1):
@@ -172,7 +175,6 @@ class Plugin(libdnf5.plugin.IPlugin):
         except (ConnectionRefusedError, socket.timeout, OSError):
             pass
 
-        import os
         try:
             is_root = os.geteuid() == 0
         except AttributeError:
@@ -214,7 +216,6 @@ class Plugin(libdnf5.plugin.IPlugin):
             return True
         
         # Check if local proxy is active and responding to identity/health checks
-        import urllib.request
         proxy_active = False
         try:
             url = f"http://{self.proxy_host}:{self.proxy_port}/ping"
@@ -304,8 +305,6 @@ class Plugin(libdnf5.plugin.IPlugin):
             
             if expected_hashes:
                 # Send the expected hashes to the local proxy server
-                import json
-                import urllib.request
                 url = f"http://{self.proxy_host}:{self.proxy_port}/expected_hashes"
                 data = json.dumps(expected_hashes).encode("utf-8")
                 req = urllib.request.Request(

@@ -1,0 +1,128 @@
+#!/usr/bin/env python3
+# dnf-p2p-client - Command-line client for P2P package sharing daemon
+#
+# Copyright (C) 2026 libdnf-p2p-sharing contributors
+# Licensed under GNU General Public License v2.0 or later
+
+import argparse
+import sys
+import json
+import urllib.request
+import urllib.error
+from pathlib import Path
+from configparser import ConfigParser
+
+def load_config_port(config_path=None):
+    DEFAULT_HOST = "127.0.0.1"
+    DEFAULT_PORT = 8888
+    
+    config_paths = []
+    if config_path:
+        config_paths.append(Path(config_path))
+    else:
+        config_paths.extend([
+            Path("/etc/dnf/libdnf5-plugins/python_plugins_loader.d/p2p_plugin.conf"),
+            Path("/etc/dnf/libdnf5-plugins/p2p-plugin.conf"),
+            Path("/etc/dnf/libdnf5-plugins/p2p_plugin.conf"),
+            Path("/etc/dnf/libdnf-plugins/p2p-plugin.conf"),
+            Path("/etc/dnf/plugins/p2p-plugin.conf"),
+        ])
+        
+    for path in config_paths:
+        if path.exists():
+            try:
+                config = ConfigParser()
+                config.read(path)
+                if config.has_section("p2p"):
+                    host = config.get("p2p", "proxy_host", fallback=DEFAULT_HOST)
+                    port = config.getint("p2p", "proxy_port", fallback=DEFAULT_PORT)
+                    return host, port
+            except Exception:
+                pass
+    return DEFAULT_HOST, DEFAULT_PORT
+
+def format_bytes(bytes_count):
+    if bytes_count < 1024:
+        return f"{bytes_count} B"
+    elif bytes_count < 1024 * 1024:
+        return f"{bytes_count / 1024:.2f} KB"
+    elif bytes_count < 1024 * 1024 * 1024:
+        return f"{bytes_count / (1024 * 1024):.2f} MB"
+    else:
+        return f"{bytes_count / (1024 * 1024 * 1024):.2f} GB"
+
+def cmd_status(args):
+    host, port = load_config_port(args.config)
+    if args.host:
+        host = args.host
+    if args.port:
+        port = args.port
+        
+    url = f"http://{host}:{port}/stats"
+    try:
+        req = urllib.request.Request(url)
+        with urllib.request.urlopen(req, timeout=5) as response:
+            if response.status == 200:
+                data = json.loads(response.read().decode('utf-8'))
+                
+                # Output user-friendly overview
+                print("==================================================")
+                print("           DNF P2P Daemon State & Stats           ")
+                print("==================================================")
+                print(f"Proxy Address:         http://{host}:{port}")
+                
+                # Cache hits/misses
+                hits = data.get("cache_hits", 0)
+                misses = data.get("cache_misses", 0)
+                total = hits + misses
+                ratio = data.get("cache_hit_miss_ratio", 0.0) * 100.0
+                print(f"Cache Hits:            {hits}")
+                print(f"Cache Misses:          {misses}")
+                print(f"Cache Hit Ratio:       {ratio:.2f}% (Total requests: {total})")
+                
+                # Cache size
+                cache_size = data.get("cache_size_bytes", 0)
+                print(f"Cache Size on Disk:    {format_bytes(cache_size)}")
+                
+                # Peers
+                disc_peers = data.get("discovered_peers", 0)
+                act_peers = data.get("active_peers", 0)
+                print(f"Discovered Peers:      {disc_peers}")
+                print(f"Active P2P Connections: {act_peers}")
+                
+                # Bandwidth
+                saved = data.get("bandwidth_saved_bytes", 0)
+                print(f"Bandwidth Saved:       {format_bytes(saved)}")
+                print("==================================================")
+                return 0
+    except urllib.error.URLError as e:
+        print(f"Error: Failed to connect to the P2P proxy at {url}.", file=sys.stderr)
+        print(f"Details: {e.reason}", file=sys.stderr)
+        print("Please check if the dnf-p2p-proxy service is running.", file=sys.stderr)
+        return 1
+    except Exception as e:
+        print(f"Error: An unexpected error occurred: {e}", file=sys.stderr)
+        return 1
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Command-line client for DNF P2P package sharing proxy"
+    )
+    parser.add_argument("--config", default=None, help="Path to config file")
+    parser.add_argument("--host", default=None, help="Host of the proxy server")
+    parser.add_argument("--port", type=int, default=None, help="Port of the proxy server")
+    
+    subparsers = parser.add_subparsers(dest="command", help="Subcommands")
+    
+    status_parser = subparsers.add_parser("status", help="Get daemon status and statistics")
+    
+    args = parser.parse_args()
+    
+    if args.command == "status" or not args.command:
+        sys.exit(cmd_status(args))
+    else:
+        parser.print_help()
+        sys.exit(0)
+
+if __name__ == "__main__":
+    main()

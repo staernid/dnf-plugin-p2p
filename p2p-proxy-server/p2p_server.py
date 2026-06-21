@@ -13,11 +13,14 @@ import socket
 import sys
 import threading
 import urllib.parse
+import json
+import re
 import requests
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from socketserver import ThreadingMixIn
 from pathlib import Path
 from typing import Optional
+from configparser import ConfigParser
 
 
 # Set up local paths relative to this script
@@ -44,6 +47,28 @@ class P2PProxyHandler(BaseHTTPRequestHandler):
     # Map of filename -> expected_hash registered by local DNF instances
     expected_hashes = {}
     expected_hashes_lock = threading.Lock()
+
+    # Stats tracking (thread-safe)
+    stats_lock = threading.Lock()
+    cache_hits = 0
+    cache_misses = 0
+    bandwidth_saved = 0
+
+    @classmethod
+    def record_hit(cls, size: int):
+        with cls.stats_lock:
+            cls.cache_hits += 1
+            cls.bandwidth_saved += size
+
+    @classmethod
+    def record_miss(cls):
+        with cls.stats_lock:
+            cls.cache_misses += 1
+
+    @classmethod
+    def record_p2p_saved(cls, size: int):
+        with cls.stats_lock:
+            cls.bandwidth_saved += size
 
     def _is_local_client(self) -> bool:
         """Check if the client is local (loopback)."""
@@ -118,7 +143,6 @@ class P2PProxyHandler(BaseHTTPRequestHandler):
                 content_length = int(self.headers.get('Content-Length', 0))
                 if content_length > 0:
                     post_data = self.rfile.read(content_length)
-                    import json
                     try:
                         hashes = json.loads(post_data.decode('utf-8'))
                         if isinstance(hashes, dict):
@@ -159,6 +183,66 @@ class P2PProxyHandler(BaseHTTPRequestHandler):
                 self.end_headers()
                 try:
                     self.wfile.write(b"pong")
+                except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError) as e:
+                    raise ClientDisconnected() from e
+                return
+
+            # Stats / Status endpoint returning JSON metadata
+            if parsed_path.path in ("/stats", "/status"):
+                if not is_local:
+                    self.send_error(403, "Access Denied: Stats only allowed from localhost")
+                    return
+                
+                with P2PProxyHandler.stats_lock:
+                    hits = P2PProxyHandler.cache_hits
+                    misses = P2PProxyHandler.cache_misses
+                    bandwidth_saved = P2PProxyHandler.bandwidth_saved
+                
+                total_requests = hits + misses
+                ratio = float(hits) / total_requests if total_requests > 0 else 0.0
+                
+                cache_size = 0
+                if self.cache:
+                    try:
+                        with self.cache.lock:
+                            cache_size = sum(info.get("size", 0) for info in self.cache.index.values())
+                    except Exception as e:
+                        logger.error(f"Error calculating cache size: {e}")
+                
+                discovered_peers = 0
+                active_peers = 0
+                if self.libp2p_node:
+                    try:
+                        val = self.libp2p_node.num_discovered_peers
+                        if isinstance(val, (int, float)):
+                            discovered_peers = int(val)
+                    except Exception:
+                        pass
+                    try:
+                        val = self.libp2p_node.num_active_peers
+                        if isinstance(val, (int, float)):
+                            active_peers = int(val)
+                    except Exception:
+                        pass
+                
+                stats_data = {
+                    "cache_hits": hits,
+                    "cache_misses": misses,
+                    "cache_hit_miss_ratio": ratio,
+                    "cache_size_bytes": cache_size,
+                    "discovered_peers": discovered_peers,
+                    "active_peers": active_peers,
+                    "bandwidth_saved_bytes": bandwidth_saved
+                }
+                
+                response_bytes = json.dumps(stats_data, indent=2).encode("utf-8")
+                
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(response_bytes)))
+                self.end_headers()
+                try:
+                    self.wfile.write(response_bytes)
                 except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError) as e:
                     raise ClientDisconnected() from e
                 return
@@ -226,8 +310,17 @@ class P2PProxyHandler(BaseHTTPRequestHandler):
 
                 if cache_file:
                     logger.info(f"Serving {filename} from local cache")
+                    file_size = 0
+                    try:
+                        file_size = cache_file.stat().st_size
+                    except Exception:
+                        pass
                     self._serve_file(cache_file)
+                    self.record_hit(file_size)
                     return
+
+            # If cache_file is None, we have a cache miss
+            self.record_miss()
 
             # For remote clients, if the package is not in cache, return 404 immediately.
             # Remote clients cannot trigger peer searches or mirror downloads.
@@ -252,10 +345,13 @@ class P2PProxyHandler(BaseHTTPRequestHandler):
                 for peer in peers:
                     peer_ip = peer["ip"]
                     peer_port = peer["port"]
-                    peer_url = f"http://{peer_ip}:{peer_port}/packages/{filename}"
+                    if ":" in peer_ip:
+                        peer_url = f"http://[{peer_ip}]:{peer_port}/packages/{filename}"
+                    else:
+                        peer_url = f"http://{peer_ip}:{peer_port}/packages/{filename}"
                     logger.info(f"Attempting to download {filename} from peer {peer_ip}:{peer_port}")
                     # Enforce the trusted expected_hash
-                    if self._download_and_serve(peer_url, filename, expected_hash=expected_hash):
+                    if self._download_and_serve(peer_url, filename, expected_hash=expected_hash, is_p2p=True):
                         return
                 logger.warning(f"Failed to fetch {filename} from any peers. Falling back to remote mirror.")
 
@@ -364,7 +460,6 @@ class P2PProxyHandler(BaseHTTPRequestHandler):
         Uses a regex that targets only the URL text inside <url ...>...</url>
         elements, leaving checksums and all other content untouched.
         """
-        import re
         # Match <url ...>https://...</url> and rewrite only the URL text
         def _rewrite_url_element(match):
             prefix = match.group(1)
@@ -433,7 +528,7 @@ class P2PProxyHandler(BaseHTTPRequestHandler):
             logger.error(f"Error streaming from {url}: {e}")
             return False
 
-    def _download_and_serve(self, url: str, filename: str, expected_hash: Optional[str] = None) -> bool:
+    def _download_and_serve(self, url: str, filename: str, expected_hash: Optional[str] = None, is_p2p: bool = False) -> bool:
         """Download file from URL, stream it to client, and save to cache."""
         temp_file = self.cache.cache_dir / f"{filename}.tmp"
         success = False
@@ -469,6 +564,12 @@ class P2PProxyHandler(BaseHTTPRequestHandler):
                 raise ClientDisconnected("Hash mismatch detected")
 
             success = True
+            if is_p2p:
+                try:
+                    file_size = temp_file.stat().st_size
+                except Exception:
+                    file_size = 0
+                self.record_p2p_saved(file_size)
             return True
         except ClientDisconnected:
             raise
@@ -515,9 +616,6 @@ def _get_systemd_socket():
     Systemd passes pre-bound sockets as file descriptors starting at 3.
     It signals this via LISTEN_FDS=<n> and LISTEN_PID=<pid>.
     """
-    import os
-    import socket as _socket
-
     listen_fds = int(os.environ.get("LISTEN_FDS", 0))
     listen_pid = int(os.environ.get("LISTEN_PID", 0))
 
@@ -526,7 +624,7 @@ def _get_systemd_socket():
 
     # First fd is SD_LISTEN_FDS_START = 3
     fd = 3
-    sock = _socket.fromfd(fd, _socket.AF_INET, _socket.SOCK_STREAM)
+    sock = socket.fromfd(fd, socket.AF_INET, socket.SOCK_STREAM)
     # fromfd() dups the fd; close the original so we don't leak it
     os.close(fd)
     sock.setblocking(True)
@@ -644,7 +742,6 @@ def main():
     for path in config_paths:
         if path.exists():
             try:
-                from configparser import ConfigParser
                 config = ConfigParser()
                 config.read(path)
                 if config.has_section("p2p"):

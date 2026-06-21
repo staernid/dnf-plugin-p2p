@@ -324,3 +324,111 @@ def test_http_handler_cache_corruption_eviction(test_server):
         P2PProxyHandler.expected_hashes.pop("corrupted.rpm", None)
 
 
+def test_http_handler_stats(test_server):
+    import json
+    server, port, mock_cache, mock_node = test_server
+    
+    # Reset stats
+    with P2PProxyHandler.stats_lock:
+        P2PProxyHandler.cache_hits = 0
+        P2PProxyHandler.cache_misses = 0
+        P2PProxyHandler.bandwidth_saved = 0
+
+    # 1. Access stats endpoint (empty stats)
+    url = f"http://127.0.0.1:{port}/stats"
+    response = urllib.request.urlopen(url)
+    assert response.getcode() == 200
+    data = json.loads(response.read().decode('utf-8'))
+    assert data["cache_hits"] == 0
+    assert data["cache_misses"] == 0
+    assert data["cache_hit_miss_ratio"] == 0.0
+    assert data["bandwidth_saved_bytes"] == 0
+
+    # 2. Simulate a cache hit
+    temp_file = Path("/tmp/mock_cache_dir/test-package.rpm")
+    mock_cache.get_cached_file_by_name.return_value = temp_file
+    
+    from unittest.mock import mock_open
+    with patch.object(Path, "exists", return_value=True), \
+         patch.object(Path, "stat") as mock_stat, \
+         patch("builtins.open", mock_open(read_data=b"mock-rpm-bytes")):
+        
+        mock_stat.return_value.st_size = 14
+        
+        url_hit = f"http://127.0.0.1:{port}/packages/test-package.rpm"
+        urllib.request.urlopen(url_hit)
+        
+    # Check stats again
+    response = urllib.request.urlopen(url)
+    data = json.loads(response.read().decode('utf-8'))
+    assert data["cache_hits"] == 1
+    assert data["cache_misses"] == 0
+    assert data["cache_hit_miss_ratio"] == 1.0
+    assert data["bandwidth_saved_bytes"] == 14
+
+
+def test_http_handler_peer_fallback_ipv6(test_server):
+    server, port, mock_cache, mock_node = test_server
+    mock_cache.get_cached_file_by_name.return_value = None
+    
+    import hashlib
+    expected_hash = hashlib.sha256(b"chunk1").hexdigest()
+
+    # Package does not exist locally; peer has IPv6 address
+    mock_node.query_peers_for_package.return_value = [
+        {"ip": "2001:db8::1", "port": 8888, "hash": expected_hash, "size": 100}
+    ]
+    
+    mock_response = MagicMock()
+    mock_response.status_code = 200
+    mock_response.headers = {"Content-Length": "6"}
+    mock_response.iter_content.return_value = [b"chunk1"]
+    
+    from unittest.mock import mock_open
+    with patch.object(Path, "exists", return_value=False), \
+         patch.object(Path, "rename") as mock_rename, \
+         patch("requests.get", return_value=mock_response) as mock_get, \
+         patch("builtins.open", mock_open()):
+        
+        P2PProxyHandler.expected_hashes["ipv6-package.rpm"] = expected_hash
+        try:
+            url = f"http://127.0.0.1:{port}/packages/ipv6-package.rpm"
+            response = urllib.request.urlopen(url, timeout=1)
+            assert response.getcode() == 200
+            assert response.read() == b"chunk1"
+            
+            # Assert that requests.get was called with bracket-enclosed IPv6 address
+            mock_get.assert_any_call("http://[2001:db8::1]:8888/packages/ipv6-package.rpm", stream=True, timeout=15)
+        finally:
+            P2PProxyHandler.expected_hashes.pop("ipv6-package.rpm", None)
+
+
+def test_client_cli(test_server):
+    server, port, mock_cache, mock_node = test_server
+    
+    # Reset stats
+    with P2PProxyHandler.stats_lock:
+        P2PProxyHandler.cache_hits = 5
+        P2PProxyHandler.cache_misses = 5
+        P2PProxyHandler.bandwidth_saved = 1000
+
+    import subprocess
+    import sys
+    
+    client_path = Path(__file__).parent.parent / "p2p-proxy-server" / "dnf-p2p-client"
+    
+    # Run: python3 dnf-p2p-client --host 127.0.0.1 --port <port> status
+    result = subprocess.run(
+        [sys.executable, str(client_path), "--host", "127.0.0.1", "--port", str(port), "status"],
+        capture_output=True,
+        text=True,
+        check=True
+    )
+    
+    assert "Cache Hits:            5" in result.stdout
+    assert "Cache Misses:          5" in result.stdout
+    assert "Cache Hit Ratio:       50.00%" in result.stdout
+    assert "Bandwidth Saved:       1000 B" in result.stdout
+
+
+

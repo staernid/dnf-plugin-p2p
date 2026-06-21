@@ -7,43 +7,6 @@ Plugin Configuration
 The plugin configuration is loaded from:
 ``/etc/dnf/libdnf5-plugins/python_plugins_loader.d/p2p_plugin.conf``
 
-.. code-block:: ini
-
-    [main]
-    name = p2p_plugin
-    enabled = 1
-
-    [p2p]
-    # Enable P2P sharing
-    enabled = true
-
-    # Local proxy server port
-    proxy_port = 8888
-
-    # Local proxy server host
-    proxy_host = 127.0.0.1
-
-    # Enable caching for sharing with peers
-    cache_enabled = true
-
-    # Maximum package cache size in MB (0 or less to disable size limits)
-    max_cache_size_mb = 1024
-
-    # Maximum disk usage percentage for the cache file system (0 or less to disable disk space checks)
-    max_disk_usage_percent = 90.0
-
-    # Enable debug logging (prints plugin messages to stderr)
-    debug = false
-
-    # Force upgrading of upstream HTTP mirror URLs to HTTPS (default: true)
-    force_https = true
-
-    # libp2p listener port (default: 8000)
-    libp2p_port = 8000
-
-    # Package cache directory (default: /var/cache/dnf-plugin-p2p when root)
-    cache_dir = /var/cache/dnf-plugin-p2p
-
 Configuration options:
 
 * **[main] / enabled**: Enables or disables the DNF5 loading mechanism for
@@ -57,10 +20,10 @@ Configuration options:
   other peers.
 * **[p2p] / max_cache_size_mb**: Maximum size of the package cache in MB.
   If the cache exceeds this size, the oldest packages are evicted using an LRU
-  policy (default: ``1024``).
+  policy (default: ``8192``).
 * **[p2p] / max_disk_usage_percent**: Maximum disk usage percentage for the
   cache filesystem. If usage goes above this threshold, the oldest packages
-  are evicted using an LRU policy (default: ``90.0``).
+  are evicted using an LRU policy (default: ``96.0``).
 * **[p2p] / debug**: Enables verbose ``>>>`` debug messages printed to
   stderr during DNF operations (default: ``false``).
 * **[p2p] / force_https**: Force upgrading upstream HTTP mirror URLs to HTTPS

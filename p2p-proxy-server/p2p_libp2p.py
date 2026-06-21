@@ -4,6 +4,17 @@ import threading
 import trio
 import multiaddr
 from typing import Dict, List, Optional, Callable
+
+# Fallback stub for miniupnpc, which is an optional dependency of py-libp2p
+# but is unconditionally imported by it at startup. Since UPnP is disabled
+# by default, a dummy mock prevents startup crashes when python3-miniupnpc is not installed.
+try:
+    import miniupnpc
+except ImportError:
+    import sys
+    from unittest.mock import MagicMock
+    sys.modules['miniupnpc'] = MagicMock()
+
 from libp2p import new_host
 from libp2p.crypto.secp256k1 import create_new_key_pair
 from libp2p.custom_types import TProtocol
@@ -17,17 +28,30 @@ logger = logging.getLogger("p2p_libp2p")
 PROTOCOL_ID = TProtocol("/dnf-p2p/query/1.0.0")
 
 def extract_ip(addrs) -> Optional[str]:
-    """Extract first non-loopback IPv4 address from a list of multiaddrs."""
+    """Extract first non-loopback IPv4 or IPv6 address from a list of multiaddrs."""
+    # First pass: look for non-loopback IPv4
     for addr in addrs:
         parts = str(addr).split('/')
         if len(parts) > 2 and parts[1] == 'ip4':
             ip = parts[2]
             if ip != '127.0.0.1':
                 return ip
-    # Fallback to loopback if no other IP is found
+    # Second pass: look for non-loopback IPv6
+    for addr in addrs:
+        parts = str(addr).split('/')
+        if len(parts) > 2 and parts[1] == 'ip6':
+            ip = parts[2]
+            if ip != '::1':
+                return ip
+    # Third pass: loopback IPv4
     for addr in addrs:
         parts = str(addr).split('/')
         if len(parts) > 2 and parts[1] == 'ip4':
+            return parts[2]
+    # Fourth pass: loopback IPv6
+    for addr in addrs:
+        parts = str(addr).split('/')
+        if len(parts) > 2 and parts[1] == 'ip6':
             return parts[2]
     return None
 
@@ -47,6 +71,21 @@ class P2PLibp2pNode:
         self.rr = None
         self.codec = None
         self._started_event = threading.Event()
+
+    @property
+    def num_discovered_peers(self) -> int:
+        """Return the number of discovered peers."""
+        return len(self.discovered_peers)
+
+    @property
+    def num_active_peers(self) -> int:
+        """Return the number of active peer connections."""
+        if self.host:
+            try:
+                return len(self.host.get_connected_peers())
+            except Exception:
+                pass
+        return 0
 
     def start(self):
         """Start the libp2p node in a background thread running Trio."""
@@ -70,6 +109,14 @@ class P2PLibp2pNode:
         if port <= 0:
             port = find_free_port()
         listen_addrs = get_available_interfaces(port)
+        # Ensure we explicitly listen on the IPv6 wildcard address
+        try:
+            ipv6_wildcard = multiaddr.Multiaddr(f"/ip6/::/tcp/{port}")
+            if ipv6_wildcard not in listen_addrs:
+                listen_addrs.append(ipv6_wildcard)
+                logger.info(f"Added IPv6 wildcard listener: /ip6/::/tcp/{port}")
+        except Exception as e:
+            logger.warning(f"Failed to add IPv6 wildcard listener: {e}")
 
         # Generate a stable-enough keypair for this session
         secret = secrets.token_bytes(32)
@@ -92,6 +139,7 @@ class P2PLibp2pNode:
             package_name = request.get("package", "")
             logger.debug(f"Received query request for package: {package_name} from {context.peer_id}")
             
+            # Response must indicate if we have the package
             response = {
                 "has_package": False,
                 "http_port": self.local_http_port
@@ -109,7 +157,6 @@ class P2PLibp2pNode:
 
         # Signal that the node is ready
         self._started_event.set()
-
 
         async with self.host.run(listen_addrs=listen_addrs), trio.open_nursery() as nursery:
             nursery.start_soon(self.host.get_peerstore().start_cleanup_task, 60)
