@@ -74,7 +74,7 @@ class Plugin(libdnf5.plugin.IPlugin):
     @staticmethod
     def get_version():
         """Return the plugin version."""
-        return libdnf5.plugin.Version(0, 3, 2)
+        return libdnf5.plugin.Version(0, 3, 3)
 
     @staticmethod
     def get_attributes():
