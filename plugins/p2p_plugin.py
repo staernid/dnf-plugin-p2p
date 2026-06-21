@@ -56,7 +56,11 @@ class Plugin(libdnf5.plugin.IPlugin):
     @staticmethod
     def get_api_version():
         """Return the plugin API version."""
-        return libdnf5.PluginAPIVersion(2, 1)
+        import libdnf5.conf
+        v = libdnf5.conf.PluginAPIVersion()
+        v.major = 2
+        v.minor = 1
+        return v
 
     @staticmethod
     def get_name():
