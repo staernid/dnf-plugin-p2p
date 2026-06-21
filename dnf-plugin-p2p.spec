@@ -68,6 +68,7 @@ Requires:       python3-zeroconf
 Requires:       python3-trio-websocket
 Requires:       python3-morphys
 Requires:       python3-lru-dict
+%{?sysusers_requires_compat}
 Provides:       bundled(python3dist(fastecdsa)) = 2.3.2
 Provides:       bundled(python3dist(py-multibase)) = 2.0.0
 Provides:       bundled(python3dist(py-multihash)) = 3.0.0
@@ -120,14 +121,11 @@ mkdir -p %{buildroot}%{_localstatedir}/cache/dnf-plugin-p2p
 %{_bindir}/dnf-p2p-client
 %{_libexecdir}/%{name}/
 %{_unitdir}/dnf-p2p-proxy.service
+%{_sysusersdir}/dnf-p2p.conf
 %dir %attr(0755, dnf-p2p, dnf-p2p) %{_localstatedir}/cache/dnf-plugin-p2p
 
 %pre proxy
-getent group dnf-p2p >/dev/null || groupadd -r dnf-p2p
-getent passwd dnf-p2p >/dev/null || \
-    useradd -r -g dnf-p2p -d /var/cache/dnf-plugin-p2p -s /sbin/nologin \
-    -c "System user for DNF P2P Package Sharing Proxy" dnf-p2p
-exit 0
+%sysusers_create_compat systemd/sysusers.d/dnf-p2p.conf
 
 %post proxy
 %systemd_post dnf-p2p-proxy.service
