@@ -103,6 +103,8 @@ python3 -m pip install \
     --no-deps \
     fastecdsa py-multibase py-multihash py-multicodec py-cid trio-typing rpcudp libp2p pycryptodome
 
+mkdir -p %{buildroot}%{_localstatedir}/cache/dnf-plugin-p2p
+
 %files
 %config(noreplace) %{_sysconfdir}/dnf/libdnf5-plugins/python_plugins_loader.d/p2p_plugin.conf
 %{_sysconfdir}/profile.d/libdnf-python-plugin.sh
