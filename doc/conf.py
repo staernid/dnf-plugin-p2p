@@ -4,7 +4,7 @@ project = 'libdnf-p2p-sharing'
 copyright = '2024, libdnf-p2p-sharing contributors'
 author = 'libdnf-p2p-sharing contributors'
 version = '0.3'
-release = '0.3.0'
+release = '0.3.1'
 
 extensions = [
     'sphinx.ext.autodoc',
