@@ -14,7 +14,7 @@ Pre-built RPM packages are available in the official Copr repository:
 
 ```bash
 # Enable the Copr repository
-sudo dnf copr enable -y staernid/libdnf-p2p-sharing
+sudo dnf copr enable -y staernid/dnf-plugin-p2p
 
 # Install
 sudo dnf install -y dnf-plugin-p2p
