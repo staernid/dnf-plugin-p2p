@@ -1,14 +1,12 @@
-# dnf-plugin-p2p
+<img src="./assets/preview-banner.jpg" alt="dnf-plugin-p2p banner" width="100%" />
 
-A libdnf5 plugin for peer-to-peer package sharing over local networks.
+---
 
 ## Overview
 
 `dnf-plugin-p2p` enables DNF 5 / libdnf5 to discover and download RPM packages from peers on the local network using a standardized libp2p mDNS discovery network (supporting both IPv4 and IPv6), reducing bandwidth consumption and improving package download performance in environments with multiple systems.
 
-<img src="./assets/preview-banner.jpg" alt="dnf-plugin-p2p banner" width="100%" />
 
-*Forgive (and enjoy) the Gemini slop image*
 ## Installation
 
 ### From Copr (Fedora)
