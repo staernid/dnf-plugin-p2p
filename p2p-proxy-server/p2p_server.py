@@ -421,7 +421,7 @@ class P2PProxyHandler(BaseHTTPRequestHandler):
             # Fallback to remote URL for metadata
             if remote_url:
                 try:
-                    response = requests.head(remote_url, timeout=5)
+                    response = requests.head(remote_url, timeout=5, headers={"Accept-Encoding": "identity"})
                     self.send_response(response.status_code)
                     for header, value in response.headers.items():
                         if header.lower() in ["content-length", "content-type", "last-modified"]:
@@ -479,14 +479,14 @@ class P2PProxyHandler(BaseHTTPRequestHandler):
             is_metalink = "metalink" in url or "mirrorlist" in url
             
             # Forward key headers from the client (Range for zchunk, etc.)
-            forwarded_headers = {}
+            forwarded_headers = {"Accept-Encoding": "identity"}
             for hdr in ("Range", "If-Range", "If-None-Match", "If-Modified-Since"):
                 val = self.headers.get(hdr)
                 if val:
                     forwarded_headers[hdr] = val
             
             response = requests.get(url, stream=not is_metalink, timeout=15,
-                                    headers=forwarded_headers if forwarded_headers else None)
+                                    headers=forwarded_headers)
             
             if is_metalink:
                 # Rewrite mirror URLs from HTTPS to HTTP so DNF sends GETs through proxy

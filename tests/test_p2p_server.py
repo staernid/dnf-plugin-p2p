@@ -431,4 +431,52 @@ def test_client_cli(test_server):
     assert "Bandwidth Saved:       1000 B" in result.stdout
 
 
+def test_http_handler_metadata_stream_identity(test_server):
+    server, port, mock_cache, mock_node = test_server
+    P2PProxyHandler.force_https = False
+    
+    mock_response = MagicMock()
+    mock_response.status_code = 200
+    mock_response.headers = {"Content-Length": "18", "Content-Type": "application/xml"}
+    mock_response.iter_content.return_value = [b"<xml>content</xml>"]
+    
+    with patch("requests.get", return_value=mock_response) as mock_get:
+        # Request metadata file (ends with .xml, so it is streamed and bypassed from cache/P2P)
+        url = f"http://127.0.0.1:{port}/repodata/repomd.xml?remote_url=http://mirror.foo.com/repodata/repomd.xml"
+        response = urllib.request.urlopen(url, timeout=1)
+        assert response.getcode() == 200
+        assert response.read() == b"<xml>content</xml>"
+        
+        # Verify requests.get was called with the Accept-Encoding: identity header
+        mock_get.assert_called_once_with(
+            "http://mirror.foo.com/repodata/repomd.xml",
+            stream=True,
+            timeout=15,
+            headers={"Accept-Encoding": "identity"}
+        )
+
+
+def test_http_handler_metadata_head_identity(test_server):
+    server, port, mock_cache, mock_node = test_server
+    P2PProxyHandler.force_https = False
+    
+    mock_response = MagicMock()
+    mock_response.status_code = 200
+    mock_response.headers = {"Content-Length": "18", "Content-Type": "application/xml"}
+    
+    with patch("requests.head", return_value=mock_response) as mock_head:
+        # Send HEAD request for metadata file
+        url = f"http://127.0.0.1:{port}/repodata/repomd.xml?remote_url=http://mirror.foo.com/repodata/repomd.xml"
+        req = urllib.request.Request(url, method="HEAD")
+        response = urllib.request.urlopen(req, timeout=1)
+        assert response.getcode() == 200
+        
+        # Verify requests.head was called with the Accept-Encoding: identity header
+        mock_head.assert_called_once_with(
+            "http://mirror.foo.com/repodata/repomd.xml",
+            timeout=5,
+            headers={"Accept-Encoding": "identity"}
+        )
+
+
 
