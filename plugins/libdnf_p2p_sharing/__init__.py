@@ -1,7 +1,7 @@
 # libdnf_p2p_sharing package
 # Shared utilities for P2P plugin
 
-__version__ = "0.3.3"
+__version__ = "0.3.4"
 
 import logging
 
