@@ -30,7 +30,7 @@ Configuration options:
   to secure internet traffic. Set to ``false`` to allow using internal mirrors
   over plain HTTP (default: ``true``).
 * **[p2p] / libp2p_port**: Port for the libp2p listener and mDNS discovery
-  (default: ``8000``).
+  (default: ``35821``).
 * **[p2p] / cache_dir**: Package cache directory path (default:
   ``/var/cache/dnf-plugin-p2p`` when run as root, otherwise
   ``~/.cache/dnf-plugin-p2p``).

@@ -5,28 +5,28 @@ from p2p_libp2p import P2PLibp2pNode, extract_ip
 
 def test_extract_ip():
     addrs = [
-        "/ip4/127.0.0.1/tcp/8000",
-        "/ip4/192.168.1.15/tcp/8000",
+        "/ip4/127.0.0.1/tcp/35821",
+        "/ip4/192.168.1.15/tcp/35821",
     ]
     # Should prefer non-loopback IP
     assert extract_ip(addrs) == "192.168.1.15"
 
     addrs_loopback = [
-        "/ip4/127.0.0.1/tcp/8000",
+        "/ip4/127.0.0.1/tcp/35821",
     ]
     # Should fallback to loopback
     assert extract_ip(addrs_loopback) == "127.0.0.1"
 
     # Test IPv6 address extraction
     addrs_ipv6 = [
-        "/ip6/::1/tcp/8000",
-        "/ip6/2001:db8::1/tcp/8000",
+        "/ip6/::1/tcp/35821",
+        "/ip6/2001:db8::1/tcp/35821",
     ]
     # Should prefer non-loopback IPv6
     assert extract_ip(addrs_ipv6) == "2001:db8::1"
 
     addrs_ipv6_loopback = [
-        "/ip6/::1/tcp/8000",
+        "/ip6/::1/tcp/35821",
     ]
     assert extract_ip(addrs_ipv6_loopback) == "::1"
 
@@ -99,15 +99,15 @@ def test_query_peers_for_package_success_and_timeout():
 
     peer1 = MagicMock()
     peer1.peer_id.to_string.return_value = "peer1"
-    peer1.addrs = ["/ip4/192.168.1.100/tcp/8000"]
+    peer1.addrs = ["/ip4/192.168.1.100/tcp/35821"]
 
     peer2 = MagicMock()
     peer2.peer_id.to_string.return_value = "peer2"
-    peer2.addrs = ["/ip4/192.168.1.101/tcp/8000"]
+    peer2.addrs = ["/ip4/192.168.1.101/tcp/35821"]
 
     peer3 = MagicMock()
     peer3.peer_id.to_string.return_value = "peer3"
-    peer3.addrs = ["/ip4/192.168.1.102/tcp/8000"]
+    peer3.addrs = ["/ip4/192.168.1.102/tcp/35821"]
 
     node.discovered_peers = {
         "peer1": peer1,

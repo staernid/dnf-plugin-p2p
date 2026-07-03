@@ -646,7 +646,7 @@ def main():
 
     DEFAULT_HOST = "127.0.0.1"
     DEFAULT_PORT = 8888
-    DEFAULT_LIBP2P_PORT = 8000
+    DEFAULT_LIBP2P_PORT = 35821
     DEFAULT_CACHE_DIR = "/var/cache/dnf-plugin-p2p" if is_root else str(Path.home() / ".cache" / "dnf-plugin-p2p")
     DEFAULT_PEER_DISCOVERY_TIMEOUT = 2.0
     DEFAULT_MAX_PARALLEL_PEERS = 5

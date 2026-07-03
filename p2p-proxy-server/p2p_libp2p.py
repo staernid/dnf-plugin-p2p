@@ -20,6 +20,7 @@ from libp2p.crypto.secp256k1 import create_new_key_pair
 from libp2p.custom_types import TProtocol
 from libp2p.request_response import JSONCodec, RequestResponse
 from libp2p.discovery.events.peerDiscovery import peerDiscovery
+from libp2p.discovery.mdns.mdns import MDNSDiscovery
 from libp2p.utils.address_validation import find_free_port, get_available_interfaces
 from libp2p.peer.peerinfo import PeerInfo
 
@@ -123,7 +124,8 @@ class P2PLibp2pNode:
 
         peerDiscovery.register_peer_discovered_handler(on_peer_discovery)
 
-        self.host = new_host(key_pair=key_pair, enable_mDNS=True)
+        self.host = new_host(key_pair=key_pair, enable_mDNS=False)
+        self.host.mDNS = MDNSDiscovery(self.host.get_network(), port=port)
         self.rr = RequestResponse(self.host)
         self.codec = JSONCodec()
 

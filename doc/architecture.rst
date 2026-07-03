@@ -35,7 +35,7 @@ Data Flow
          v         |
     +----+---------+----+           +-------------------+
     |    libp2p Node    |<--------->|   LAN P2P Peers   |
-    |  (Port 8000)      |           |                   |
+    |  (Port 35821)     |           |                   |
     +-------------------+           +-------------------+
 
 
@@ -121,11 +121,10 @@ protocol over the ``/dnf-p2p/query/1.0.0`` protocol ID.
 
 .. important::
 
-   The libp2p TCP listener **must** be on port ``8000`` because
-   ``py-libp2p``'s ``MDNSDiscovery`` hardcodes the advertised port to
-   ``8000``. If the listener runs on a different port, peers will discover
-   the node but fail to connect. The systemd service override sets
-   ``--libp2p-port=8000`` to ensure this.
+   The libp2p TCP listener defaults to port ``35821``. This custom high
+   port avoids conflicts with other common local services (such as development
+   servers typically occupying port ``8000``). The systemd service override sets
+   ``--libp2p-port=35821`` to ensure this.
 
 The proxy's HTTP server **must** bind to ``0.0.0.0`` (not just
 ``127.0.0.1``) so that peers can download packages from it over the LAN.
