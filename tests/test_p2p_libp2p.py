@@ -151,3 +151,88 @@ def test_query_peers_for_package_success_and_timeout():
 
     # The duration should be around 2.0 seconds (due to move_on_after(2.0)), definitely less than 5.0 seconds
     assert duration < 3.0
+
+
+def test_diagnostic_check_success():
+    import trio
+    from unittest.mock import AsyncMock, patch
+
+    node = P2PLibp2pNode(libp2p_port=0, local_http_port=8888, cache_lookup_callback=None)
+    node.host = MagicMock()
+    node.host.connect = AsyncMock()
+    node.rr = MagicMock()
+    node.codec = MagicMock()
+
+    peerinfo = MagicMock()
+    peerinfo.peer_id.to_string.return_value = "peer1"
+    peerinfo.addrs = ["/ip4/192.168.1.100/tcp/8000"]
+    node.discovered_peers["peer1"] = peerinfo
+    node.tested_peers.add("peer1")
+
+    # Mock libp2p query response
+    node.rr.send_request = AsyncMock(return_value={"http_port": 8889})
+
+    mock_response = MagicMock()
+    mock_response.status_code = 200
+    mock_response.content = b"OK"
+
+    async def run_test():
+        with patch("requests.get", return_value=mock_response) as mock_get:
+            await node._run_diagnostic_check_async(peerinfo)
+            mock_get.assert_called_once_with("http://192.168.1.100:8889/packages/p2p-diagnostic.txt", timeout=3, allow_redirects=False)
+
+    trio.run(run_test)
+
+
+def test_diagnostic_check_retry_and_failure():
+    import trio
+    from unittest.mock import AsyncMock, patch
+
+    node = P2PLibp2pNode(libp2p_port=0, local_http_port=8888, cache_lookup_callback=None)
+    node.host = MagicMock()
+    node.host.connect = AsyncMock()
+    node.rr = MagicMock()
+    node.codec = MagicMock()
+
+    peerinfo = MagicMock()
+    peerinfo.peer_id.to_string.return_value = "peer1"
+    peerinfo.addrs = ["/ip4/192.168.1.100/tcp/8000"]
+    node.discovered_peers["peer1"] = peerinfo
+    node.tested_peers.add("peer1")
+
+    # Mock libp2p query response
+    node.rr.send_request = AsyncMock(return_value={"http_port": 8889})
+
+    # Test Case 1: First attempt fails, second succeeds
+    fail_response = MagicMock()
+    fail_response.raise_for_status.side_effect = Exception("HTTP error")
+    
+    success_response = MagicMock()
+    success_response.status_code = 200
+    success_response.content = b"OK"
+
+    async def run_test_retry():
+        # First call raises error, second returns success
+        with patch("requests.get", side_effect=[fail_response, success_response]) as mock_get:
+            await node._run_diagnostic_check_async(peerinfo)
+            assert mock_get.call_count == 2
+            # Peer should still be in discovered_peers
+            assert "peer1" in node.discovered_peers
+
+    trio.run(run_test_retry)
+
+    # Test Case 2: All attempts fail (logs CRITICAL and removes peer)
+    node.discovered_peers["peer1"] = peerinfo
+    node.tested_peers.add("peer1")
+
+    async def run_test_failure():
+        with patch("requests.get", side_effect=Exception("Connection refused")) as mock_get, \
+             patch.object(node, "remove_peer", wraps=node.remove_peer) as mock_remove:
+            await node._run_diagnostic_check_async(peerinfo)
+            assert mock_get.call_count == 3
+            mock_remove.assert_called_once_with("peer1")
+            assert "peer1" not in node.discovered_peers
+            assert "peer1" not in node.tested_peers
+
+    trio.run(run_test_failure)
+

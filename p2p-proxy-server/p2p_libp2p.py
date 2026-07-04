@@ -12,8 +12,12 @@ try:
     import miniupnpc
 except ImportError:
     import sys
-    from unittest.mock import MagicMock
-    sys.modules['miniupnpc'] = MagicMock()
+    class DummyMiniUPnP:
+        def __getattr__(self, name):
+            return lambda *args, **kwargs: DummyMiniUPnP()
+        def __call__(self, *args, **kwargs):
+            return self
+    sys.modules['miniupnpc'] = DummyMiniUPnP()
 
 from libp2p import new_host
 from libp2p.crypto.secp256k1 import create_new_key_pair
@@ -28,32 +32,50 @@ logger = logging.getLogger("p2p_libp2p")
 PROTOCOL_ID = TProtocol("/dnf-p2p/query/1.0.0")
 
 def extract_ip(addrs) -> Optional[str]:
-    """Extract first non-loopback IPv4 or IPv6 address from a list of multiaddrs."""
-    # First pass: look for non-loopback IPv4
+    """Extract the best IP address from a list of multiaddrs,
+    prioritizing physical LAN interfaces over virtual/docker bridges.
+    """
+    def ip_score(ip: str) -> int:
+        if ip in ('127.0.0.1', '::1', '0.0.0.0', '::'):
+            return 0
+        
+        # Check if IPv6
+        if ':' in ip:
+            if ip.lower().startswith('fe80:'):
+                return 5
+            return 50
+            
+        parts = ip.split('.')
+        if len(parts) == 4:
+            try:
+                p0, p1 = int(parts[0]), int(parts[1])
+                # Docker bridge range: 172.16.0.0 - 172.31.255.255
+                if p0 == 172 and (16 <= p1 <= 31):
+                    return 10
+                # Podman CNI range: 10.88.0.0/16
+                if p0 == 10 and p1 == 88:
+                    return 10
+                # libvirt bridge range: 192.168.122.0/24
+                p2 = int(parts[2])
+                if p0 == 192 and p1 == 168 and p2 == 122:
+                    return 10
+            except ValueError:
+                pass
+        return 200
+
+    best_ip = None
+    best_score = -1
+
     for addr in addrs:
         parts = str(addr).split('/')
-        if len(parts) > 2 and parts[1] == 'ip4':
+        if len(parts) > 2 and parts[1] in ('ip4', 'ip6'):
             ip = parts[2]
-            if ip != '127.0.0.1':
-                return ip
-    # Second pass: look for non-loopback IPv6
-    for addr in addrs:
-        parts = str(addr).split('/')
-        if len(parts) > 2 and parts[1] == 'ip6':
-            ip = parts[2]
-            if ip != '::1':
-                return ip
-    # Third pass: loopback IPv4
-    for addr in addrs:
-        parts = str(addr).split('/')
-        if len(parts) > 2 and parts[1] == 'ip4':
-            return parts[2]
-    # Fourth pass: loopback IPv6
-    for addr in addrs:
-        parts = str(addr).split('/')
-        if len(parts) > 2 and parts[1] == 'ip6':
-            return parts[2]
-    return None
+            score = ip_score(ip)
+            if score > best_score:
+                best_score = score
+                best_ip = ip
+
+    return best_ip
 
 class P2PLibp2pNode:
     """A thread-safe wrapper around py-libp2p for local peer discovery and querying."""
@@ -71,6 +93,13 @@ class P2PLibp2pNode:
         self.rr = None
         self.codec = None
         self._started_event = threading.Event()
+        self.tested_peers = set()
+        self.nursery = None
+
+    def remove_peer(self, peer_id_str: str):
+        """Remove a peer from discovered and tested sets to allow re-testing if rediscovered."""
+        self.discovered_peers.pop(peer_id_str, None)
+        self.tested_peers.discard(peer_id_str)
 
     @property
     def num_discovered_peers(self) -> int:
@@ -116,10 +145,16 @@ class P2PLibp2pNode:
 
         # Register the peer discovery event handler
         def on_peer_discovery(peerinfo: PeerInfo):
-            peer_id_str = peerinfo.peer_id.to_string()
-            if peer_id_str != self.host.get_id().to_string():
-                logger.info(f"Discovered peer: {peer_id_str} at {peerinfo.addrs}")
-                self.discovered_peers[peer_id_str] = peerinfo
+            if self.trio_token and self.nursery:
+                try:
+                    trio.from_thread.run_sync(
+                        self.nursery.start_soon,
+                        self._on_peer_discovered_async,
+                        peerinfo,
+                        trio_token=self.trio_token
+                    )
+                except Exception as e:
+                    logger.error(f"Failed to schedule peer discovery event in Trio loop: {e}")
 
         peerDiscovery.register_peer_discovered_handler(on_peer_discovery)
 
@@ -129,13 +164,27 @@ class P2PLibp2pNode:
 
         async def query_handler(request: dict, context) -> dict:
             package_name = request.get("package", "")
-            logger.debug(f"Received query request for package: {package_name} from {context.peer_id}")
+            peer_id = context.peer_id
+            peer_id_str = peer_id.to_string()
+            logger.info(f"Received query request for package: {package_name} from {peer_id_str}")
+
+            # Thread-safe/async-safe update: if we don't have this peer in discovered list, add it
+            if peer_id_str not in self.discovered_peers:
+                try:
+                    peerinfo = self.host.get_peerstore().peer_info(peer_id)
+                    if peerinfo and peerinfo.addrs:
+                        await self._on_peer_discovered_async(peerinfo)
+                except Exception as e:
+                    logger.debug(f"Failed to dynamically discover connecting peer {peer_id_str}: {e}")
             
             # Response must indicate if we have the package
             response = {
                 "has_package": False,
                 "http_port": self.local_http_port
             }
+            if package_name == "__p2p_diagnostic_ping__":
+                return response
+
             if self.cache_lookup_callback:
                 p_info = self.cache_lookup_callback(package_name)
                 if p_info:
@@ -151,6 +200,7 @@ class P2PLibp2pNode:
         self._started_event.set()
 
         async with self.host.run(listen_addrs=listen_addrs), trio.open_nursery() as nursery:
+            self.nursery = nursery
             nursery.start_soon(self.host.get_peerstore().start_cleanup_task, 60)
             logger.info(f"libp2p node running with PeerID: {self.host.get_id().to_string()}")
             await trio.sleep_forever()
@@ -164,7 +214,7 @@ class P2PLibp2pNode:
         async def do_query():
             results = []
             peer_ids = list(self.discovered_peers.keys())
-            logger.debug(f"Querying {len(peer_ids)} discovered peers for {package_name}")
+            logger.info(f"Querying {len(peer_ids)} discovered peers for {package_name}")
             limit = trio.CapacityLimiter(self.max_parallel_peers)
 
             async def query_peer(peer_id_str: str):
@@ -173,10 +223,10 @@ class P2PLibp2pNode:
                     if not peerinfo:
                         return
                     try:
-                        logger.debug(f"Connecting to peer {peer_id_str}...")
+                        logger.info(f"Connecting to peer {peer_id_str}...")
                         await self.host.connect(peerinfo)
 
-                        logger.debug(f"Sending query request to {peer_id_str}...")
+                        logger.info(f"Sending query request to {peer_id_str}...")
                         response = await self.rr.send_request(
                             peer_id=peerinfo.peer_id,
                             protocol_ids=[PROTOCOL_ID],
@@ -197,7 +247,7 @@ class P2PLibp2pNode:
                     except Exception as e:
                         logger.warning(f"Failed to query peer {peer_id_str}: {e}")
                         # Remove unresponsive peer
-                        self.discovered_peers.pop(peer_id_str, None)
+                        self.remove_peer(peer_id_str)
 
             with trio.move_on_after(self.peer_discovery_timeout):
                 async with trio.open_nursery() as nursery:
@@ -210,3 +260,97 @@ class P2PLibp2pNode:
         except Exception as e:
             logger.error(f"Error querying peers from thread: {e}")
             return []
+
+    async def _on_peer_discovered_async(self, peerinfo: PeerInfo):
+        """Handle peer discovery inside the Trio event loop."""
+        peer_id_str = peerinfo.peer_id.to_string()
+        if peer_id_str != self.host.get_id().to_string():
+            logger.info(f"Discovered peer: {peer_id_str} at {peerinfo.addrs}")
+            self.discovered_peers[peer_id_str] = peerinfo
+            if peer_id_str not in self.tested_peers:
+                self.tested_peers.add(peer_id_str)
+                if self.nursery:
+                    self.nursery.start_soon(self._run_diagnostic_check_async, peerinfo)
+
+    # TODO: maybe rethink - automatically triggering an HTTP request (requests.get) to a peer's self-reported IP/port upon discovery represents a significant security/SSRF risk.
+    # A malicious peer could connect to our node and cause us to send requests to local ports or internal services on the LAN (e.g., port scanning or service exploitation).
+    async def _run_diagnostic_check_async(self, peerinfo: PeerInfo):
+        """Connect to peer, query HTTP port via libp2p, and transfer diagnostic file via HTTP."""
+        peer_id_str = peerinfo.peer_id.to_string()
+        logger.info(f"Starting P2P diagnostic connection and transfer check for peer {peer_id_str}")
+        url = None
+        try:
+            # 1. Connect to peer
+            await self.host.connect(peerinfo)
+
+            # 2. Get HTTP port
+            response = await self.rr.send_request(
+                peer_id=peerinfo.peer_id,
+                protocol_ids=[PROTOCOL_ID],
+                request={"package": "__p2p_diagnostic_ping__"},
+                codec=self.codec
+            )
+            if not response or "http_port" not in response:
+                raise RuntimeError(f"Invalid response from peer query: {response}")
+
+            http_port = response["http_port"]
+            ip = extract_ip(peerinfo.addrs)
+            if not ip:
+                raise RuntimeError(f"Could not extract IP address from peer addresses: {peerinfo.addrs}")
+
+            # SSRF Protection: Ensure peer-reported HTTP port is non-privileged
+            try:
+                port_num = int(http_port)
+                if port_num < 1024 or port_num > 65535:
+                    raise ValueError(f"Port {port_num} is outside the allowed non-privileged range (1024-65535)")
+            except (ValueError, TypeError) as e:
+                raise RuntimeError(f"SSRF Protection: Peer reported invalid or privileged port {http_port}: {e}")
+
+            # SSRF Protection: Deny diagnostics loopback requests to local host services
+            if ip in ("127.0.0.1", "::1", "0.0.0.0", "::") or ip.startswith("127."):
+                raise RuntimeError(f"SSRF Protection: Rejecting diagnostic request to loopback address {ip}")
+
+            if ":" in ip:
+                url = f"http://[{ip}]:{http_port}/packages/p2p-diagnostic.txt"
+            else:
+                url = f"http://{ip}:{http_port}/packages/p2p-diagnostic.txt"
+
+            # 3. HTTP GET to fetch diagnostic file (with 3 retries)
+            max_retries = 3
+            last_err = None
+            for attempt in range(1, max_retries + 1):
+                try:
+                    logger.debug(f"Attempting diagnostic HTTP GET from {url} (attempt {attempt}/{max_retries})")
+                    
+                    def fetch():
+                        import requests
+                        r = requests.get(url, timeout=3, allow_redirects=False)
+                        r.raise_for_status()
+                        return r.content
+
+                    content = await trio.to_thread.run_sync(fetch)
+                    if content != b"OK":
+                        raise RuntimeError(f"Unexpected diagnostic file content: {content}")
+                    last_err = None
+                    break
+                except Exception as ex:
+                    last_err = ex
+                    if attempt < max_retries:
+                        await trio.sleep(1.0)
+
+            if last_err:
+                raise last_err
+
+            logger.info(f"Diagnostic check SUCCESS: successfully transferred diagnostic file from peer {peer_id_str} at {url}")
+
+        except Exception as e:
+            logger.critical(
+                "\n"
+                "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!\n"
+                "P2P SYSTEM ERROR: DIAGNOSTIC FILE TRANSFER FAILED between hosts!\n"
+                f"Failed to fetch diagnostic file from peer {peer_id_str} at {url or 'unknown URL'}.\n"
+                f"Error details: {e}\n"
+                "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"
+            )
+            # Remove peer from discovered list so it can be re-discovered/re-tested
+            self.remove_peer(peer_id_str)

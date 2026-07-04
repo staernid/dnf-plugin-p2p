@@ -20,6 +20,7 @@ import libdnf5.plugin
 import libdnf5.base
 import libdnf5.rpm
 import libdnf5.conf
+import libdnf5.transaction
 import subprocess
 import sys
 import logging
@@ -57,6 +58,7 @@ class Plugin(libdnf5.plugin.IPlugin):
         """Print message to stderr only if debug mode is enabled."""
         if self.debug:
             print(message, file=sys.stderr)
+
 
     @staticmethod
     def get_api_version():
@@ -264,44 +266,39 @@ class Plugin(libdnf5.plugin.IPlugin):
         return True
 
 
-    def goal_resolved(self, transaction):
-        """Hook called when a goal is resolved. Collects expected hashes of target packages
-        and registers them with the local proxy server."""
+    def pre_transaction(self, transaction):
+        """Hook called just before the transaction starts (packages are about to be downloaded).
+        Collects expected hashes of inbound packages and registers them with the local proxy server
+        so that it can verify and cache downloads."""
         if not self.enabled:
-            return True
+            return
             
         try:
             expected_hashes = {}
-            packages = transaction.get_packages()
             
-            for pkg in packages:
-                # pkg is libdnf5.transaction.Package
-                name = pkg.get_name()
-                version = pkg.get_version()
-                release = pkg.get_release()
-                arch = pkg.get_arch()
-                epoch = pkg.get_epoch()
-                repoid = pkg.get_repoid()
+            for tp in transaction.get_transaction_packages():
+                action = tp.get_action()
+                pkg = tp.get_package()
+                repo_id = pkg.get_repo_id()
+                loc = pkg.get_location()
                 
-                # Query base packages to get the checksum and location
-                query = libdnf5.rpm.PackageQuery(self.base)
-                query.filter_name(name)
-                query.filter_version(version)
-                query.filter_release(release)
-                query.filter_arch(arch)
-                query.filter_epoch(epoch)
-                query.filter_repo_id(repoid)
+                # Only care about inbound packages (install, reinstall, upgrade, downgrade)
+                if not libdnf5.transaction.transaction_item_action_is_inbound(action):
+                    continue
                 
-                for rpm_pkg in query:
-                    loc = rpm_pkg.get_location()
-                    if loc:
-                        filename = Path(loc).name
-                        checksum_obj = rpm_pkg.get_checksum()
-                        if checksum_obj:
-                            h = checksum_obj.get_checksum()
-                            t = checksum_obj.get_type_str()
-                            if t == "sha256":
-                                expected_hashes[filename] = h
+                # Skip packages from system/local repositories (already installed or scheduled for removal)
+                # Reinstall/upgrade transactions might associate inbound packages with '@System' repo ID,
+                # so we only skip if they also do not have a location.
+                if (not repo_id or repo_id.startswith("@") or repo_id.lower() in ("installed", "system")) and not loc:
+                    continue
+                
+                if not loc:
+                    continue
+                    
+                filename = Path(loc).name
+                checksum_obj = pkg.get_checksum()
+                if checksum_obj and checksum_obj.get_type_str() == "sha256":
+                    expected_hashes[filename] = checksum_obj.get_checksum()
             
             if expected_hashes:
                 # Send the expected hashes to the local proxy server
@@ -320,9 +317,7 @@ class Plugin(libdnf5.plugin.IPlugin):
                 except Exception as e:
                     logger.warning(f"P2P Sharing Plugin: Failed to register expected hashes with proxy: {e}")
         except Exception as e:
-            logger.error(f"P2P Sharing Plugin: Error in goal_resolved hook: {e}", exc_info=True)
-            
-        return True
+            logger.error(f"P2P Sharing Plugin: Error in pre_transaction hook: {e}", exc_info=True)
 
     def finish(self):
         """Plugin cleanup — proxy daemon is intentionally left running across DNF5 invocations."""

@@ -94,7 +94,7 @@ def test_http_handler_peer_fallback(test_server):
                 
             # Assert that it queried the libp2p node and tried to download from the peer
             mock_node.query_peers_for_package.assert_called_with("test-package.rpm")
-            mock_get.assert_any_call("http://192.168.1.100:8888/packages/test-package.rpm", stream=True, timeout=15)
+            mock_get.assert_any_call("http://192.168.1.100:8888/packages/test-package.rpm", stream=True, timeout=15, allow_redirects=False)
         finally:
             P2PProxyHandler.expected_hashes.pop("test-package.rpm", None)
 
@@ -184,11 +184,16 @@ def test_main_config_loading_and_override():
         assert P2PProxyHandler.force_https is False
 
 
+
+
 def test_http_handler_force_https_enabled(test_server):
     server, port, mock_cache, mock_node = test_server
     mock_cache.get_cached_file_by_name.return_value = None
     mock_node.query_peers_for_package.return_value = []
     
+    import hashlib
+    expected_hash = hashlib.sha256(b"chunk1").hexdigest()
+    P2PProxyHandler.expected_hashes["test-package.rpm"] = expected_hash
     P2PProxyHandler.force_https = True
     
     # Mock requests.get to return a successful response
@@ -198,18 +203,21 @@ def test_http_handler_force_https_enabled(test_server):
     mock_response.iter_content.return_value = [b"chunk1"]
     
     from unittest.mock import mock_open
-    with patch.object(Path, "exists", return_value=False), \
-         patch.object(Path, "rename") as mock_rename, \
-         patch("requests.get", return_value=mock_response) as mock_get, \
-         patch("builtins.open", mock_open()):
-        
-        url = f"http://127.0.0.1:{port}/packages/test-package.rpm?remote_url=http://mirror.foo.com/packages/test-package.rpm"
-        response = urllib.request.urlopen(url, timeout=1)
-        assert response.getcode() == 200
-        assert response.read() == b"chunk1"
+    try:
+        with patch.object(Path, "exists", return_value=False), \
+             patch.object(Path, "rename") as mock_rename, \
+             patch("requests.get", return_value=mock_response) as mock_get, \
+             patch("builtins.open", mock_open()):
             
-        # Assert that requests.get was called with the upgraded HTTPS url
-        mock_get.assert_any_call("https://mirror.foo.com/packages/test-package.rpm", stream=True, timeout=15)
+            url = f"http://127.0.0.1:{port}/packages/test-package.rpm?remote_url=http://mirror.foo.com/packages/test-package.rpm"
+            response = urllib.request.urlopen(url, timeout=1)
+            assert response.getcode() == 200
+            assert response.read() == b"chunk1"
+                
+            # Assert that requests.get was called with the upgraded HTTPS url
+            mock_get.assert_any_call("https://mirror.foo.com/packages/test-package.rpm", stream=True, timeout=15)
+    finally:
+        P2PProxyHandler.expected_hashes.pop("test-package.rpm", None)
 
 
 def test_http_handler_force_https_disabled(test_server):
@@ -217,6 +225,9 @@ def test_http_handler_force_https_disabled(test_server):
     mock_cache.get_cached_file_by_name.return_value = None
     mock_node.query_peers_for_package.return_value = []
     
+    import hashlib
+    expected_hash = hashlib.sha256(b"chunk1").hexdigest()
+    P2PProxyHandler.expected_hashes["test-package.rpm"] = expected_hash
     P2PProxyHandler.force_https = False
     
     # Mock requests.get to return a successful response
@@ -226,18 +237,21 @@ def test_http_handler_force_https_disabled(test_server):
     mock_response.iter_content.return_value = [b"chunk1"]
     
     from unittest.mock import mock_open
-    with patch.object(Path, "exists", return_value=False), \
-         patch.object(Path, "rename") as mock_rename, \
-         patch("requests.get", return_value=mock_response) as mock_get, \
-         patch("builtins.open", mock_open()):
-        
-        url = f"http://127.0.0.1:{port}/packages/test-package.rpm?remote_url=http://mirror.foo.com/packages/test-package.rpm"
-        response = urllib.request.urlopen(url, timeout=1)
-        assert response.getcode() == 200
-        assert response.read() == b"chunk1"
+    try:
+        with patch.object(Path, "exists", return_value=False), \
+             patch.object(Path, "rename") as mock_rename, \
+             patch("requests.get", return_value=mock_response) as mock_get, \
+             patch("builtins.open", mock_open()):
             
-        # Assert that requests.get was called with the original HTTP url
-        mock_get.assert_any_call("http://mirror.foo.com/packages/test-package.rpm", stream=True, timeout=15)
+            url = f"http://127.0.0.1:{port}/packages/test-package.rpm?remote_url=http://mirror.foo.com/packages/test-package.rpm"
+            response = urllib.request.urlopen(url, timeout=1)
+            assert response.getcode() == 200
+            assert response.read() == b"chunk1"
+                
+            # Assert that requests.get was called with the original HTTP url
+            mock_get.assert_any_call("http://mirror.foo.com/packages/test-package.rpm", stream=True, timeout=15)
+    finally:
+        P2PProxyHandler.expected_hashes.pop("test-package.rpm", None)
 
 
 def test_http_handler_remote_client_denied(test_server):
@@ -261,6 +275,32 @@ def test_http_handler_remote_client_denied(test_server):
         with pytest.raises(urllib.error.HTTPError) as excinfo:
             urllib.request.urlopen(url, timeout=1)
         assert excinfo.value.code == 404
+
+
+def test_http_handler_diagnostic_endpoint(test_server):
+    server, port, mock_cache, mock_node = test_server
+    
+    # 1. Local GET request
+    url = f"http://127.0.0.1:{port}/packages/p2p-diagnostic.txt"
+    response = urllib.request.urlopen(url, timeout=1)
+    assert response.getcode() == 200
+    assert response.headers.get("Content-Type") == "text/plain"
+    assert response.headers.get("Content-Length") == "2"
+    assert response.read() == b"OK"
+
+    # 2. Local HEAD request
+    req = urllib.request.Request(url, method="HEAD")
+    response_head = urllib.request.urlopen(req, timeout=1)
+    assert response_head.getcode() == 200
+    assert response_head.headers.get("Content-Type") == "text/plain"
+    assert response_head.headers.get("Content-Length") == "2"
+    assert response_head.read() == b""
+
+    # 3. Remote client GET request (should be allowed and succeed)
+    with patch.object(P2PProxyHandler, "_is_local_client", return_value=False):
+        response_remote = urllib.request.urlopen(url, timeout=1)
+        assert response_remote.getcode() == 200
+        assert response_remote.read() == b"OK"
 
 
 def test_http_handler_expected_hash_mismatch(test_server):
@@ -398,7 +438,7 @@ def test_http_handler_peer_fallback_ipv6(test_server):
             assert response.read() == b"chunk1"
             
             # Assert that requests.get was called with bracket-enclosed IPv6 address
-            mock_get.assert_any_call("http://[2001:db8::1]:8888/packages/ipv6-package.rpm", stream=True, timeout=15)
+            mock_get.assert_any_call("http://[2001:db8::1]:8888/packages/ipv6-package.rpm", stream=True, timeout=15, allow_redirects=False)
         finally:
             P2PProxyHandler.expected_hashes.pop("ipv6-package.rpm", None)
 
@@ -477,6 +517,78 @@ def test_http_handler_metadata_head_identity(test_server):
             timeout=5,
             headers={"Accept-Encoding": "identity"}
         )
+
+
+def test_client_status_cmd(test_server):
+    import importlib.util
+    from importlib.machinery import SourceFileLoader
+    client_path = Path(__file__).parent.parent / "p2p-proxy-server" / "dnf-p2p-client"
+    loader = SourceFileLoader("dnf_p2p_client", str(client_path))
+    spec = importlib.util.spec_from_loader("dnf_p2p_client", loader)
+    client_module = importlib.util.module_from_spec(spec)
+    loader.exec_module(client_module)
+
+    server, port, mock_cache, mock_node = test_server
+    mock_node.num_discovered_peers = 3
+    mock_node.num_active_peers = 2
+    mock_cache.index = {
+        "hash1": {"filename": "pkg1.rpm", "size": 100}
+    }
+
+    # Mock command line arguments
+    args = MagicMock()
+    args.config = None
+    args.host = "127.0.0.1"
+    args.port = port
+
+    with patch("sys.stdout") as mock_stdout:
+        rc = client_module.cmd_status(args)
+        assert rc == 0
+
+
+def test_client_test_transfer_cmd(test_server):
+    import importlib.util
+    from importlib.machinery import SourceFileLoader
+    client_path = Path(__file__).parent.parent / "p2p-proxy-server" / "dnf-p2p-client"
+    loader = SourceFileLoader("dnf_p2p_client", str(client_path))
+    spec = importlib.util.spec_from_loader("dnf_p2p_client", loader)
+    client_module = importlib.util.module_from_spec(spec)
+    loader.exec_module(client_module)
+
+    server, port, mock_cache, mock_node = test_server
+
+    # Set up cache file
+    pkg_file = Path("/tmp/mock_cache_dir/test-package-cli.rpm")
+    mock_cache.get_cached_file_by_name.return_value = pkg_file
+    
+    import hashlib
+    expected_content = "dummy-package-content"
+    expected_hash = hashlib.sha256(expected_content.encode()).hexdigest()
+    mock_cache.get_file_hash.return_value = expected_hash
+
+    args = MagicMock()
+    args.config = None
+    args.host = "127.0.0.1"
+    args.port = port
+    args.filename = "test-package-cli.rpm"
+    args.hash = expected_hash
+    args.expected_content = expected_content
+
+    from unittest.mock import mock_open
+    try:
+        with patch.object(Path, "exists", return_value=True), \
+             patch.object(Path, "stat") as mock_stat, \
+             patch("builtins.open", mock_open(read_data=expected_content.encode())):
+            
+            mock_stat.return_value.st_size = len(expected_content)
+
+            rc = client_module.cmd_test_transfer(args)
+            assert rc == 0
+            
+            # Verify the hash was registered in expected_hashes dict
+            assert P2PProxyHandler.expected_hashes.get("test-package-cli.rpm") == expected_hash
+    finally:
+        P2PProxyHandler.expected_hashes.pop("test-package-cli.rpm", None)
 
 
 

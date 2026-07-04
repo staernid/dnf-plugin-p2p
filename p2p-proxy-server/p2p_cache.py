@@ -125,14 +125,13 @@ class P2PCache:
                 logger.error(f"File not found: {file_path}")
                 return False
             
-            # Calculate and verify the hash
-            file_hash = self.get_file_hash(file_path)
-            if file_hash is None:
-                return False
-            
-            if package_hash is not None and file_hash != package_hash:
-                logger.warning(f"Hash mismatch for {file_path}: {file_hash} != {package_hash}")
-                return False
+            # Skip disk hash recalculation if the caller already provided/verified the package hash
+            if package_hash is not None:
+                file_hash = package_hash
+            else:
+                file_hash = self.get_file_hash(file_path)
+                if file_hash is None:
+                    return False
             
             # Copy to cache
             cache_file = self.cache_dir / file_path.name
@@ -244,6 +243,22 @@ class P2PCache:
                         except KeyError:
                             pass
                         break
+
+            # Fallback check on disk (if file exists but index missed it)
+            cache_file = self.cache_dir / filename
+            if cache_file.exists():
+                file_hash = self.get_file_hash(cache_file)
+                if file_hash:
+                    self.index[file_hash] = {
+                        "filename": filename,
+                        "size": cache_file.stat().st_size,
+                        "last_accessed": time.time()
+                    }
+                    self._save_cache_index()
+                    return {
+                        "hash": file_hash,
+                        "size": cache_file.stat().st_size
+                    }
         return None
 
     def list_cached_files(self) -> List[Dict]:

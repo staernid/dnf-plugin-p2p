@@ -1,0 +1,155 @@
+#!/bin/bash
+# Helper script to build, deploy, restart, and test dnf-plugin-p2p on multiple hosts.
+
+set -e
+
+test_sharing() {
+    local server_host=$1
+    local client_host=$2
+    echo "=== Testing Package Sharing: $server_host (server) -> $client_host (client) ==="
+    
+    # 1. Create dummy file content
+    local content="DUMMY_RPM_DATA_$(date +%s)_$RANDOM"
+    local filename="p2p-test-package-$RANDOM.rpm"
+    
+    # 2. Place package on server_host
+    if [ "$server_host" = "localhost" ]; then
+        echo -n "$content" | sudo tee /var/cache/dnf-plugin-p2p/$filename > /dev/null
+        sudo chown dnf-p2p:dnf-p2p /var/cache/dnf-plugin-p2p/$filename
+        local hash=$(sha256sum /var/cache/dnf-plugin-p2p/$filename | awk '{print $1}')
+    else
+        ssh "$server_host" "echo -n '$content' | sudo tee /var/cache/dnf-plugin-p2p/$filename > /dev/null && sudo chown dnf-p2p:dnf-p2p /var/cache/dnf-plugin-p2p/$filename"
+        local hash=$(ssh "$server_host" "sha256sum /var/cache/dnf-plugin-p2p/$filename" | awk '{print $1}')
+    fi
+    echo "Created test package $filename with hash $hash on $server_host"
+    
+    # 3. Client host registers hash and downloads it via the CLI client
+    echo "Instructing $client_host to run dnf-p2p-client test-transfer..."
+    local test_result=""
+    if [ "$client_host" = "localhost" ]; then
+        test_result=$(dnf-p2p-client test-transfer --filename "$filename" --hash "$hash" --expected-content "$content" 2>&1)
+    else
+        test_result=$(ssh "$client_host" "dnf-p2p-client test-transfer --filename '$filename' --hash '$hash' --expected-content '$content'" 2>&1)
+    fi
+    
+    # 4. Clean up
+    echo "Cleaning up test package..."
+    if [ "$server_host" = "localhost" ]; then
+        sudo rm -f /var/cache/dnf-plugin-p2p/$filename
+    else
+        ssh "$server_host" "sudo rm -f /var/cache/dnf-plugin-p2p/$filename"
+    fi
+    if [ "$client_host" = "localhost" ]; then
+        sudo rm -f /var/cache/dnf-plugin-p2p/$filename
+    else
+        ssh "$client_host" "sudo rm -f /var/cache/dnf-plugin-p2p/$filename"
+    fi
+    
+    # 5. Check results
+    if [ "$test_result" = "VERIFIED" ]; then
+        echo "SUCCESS: $server_host (server) -> $client_host (client) successfully shared the package!"
+        return 0
+    else
+        echo "FAILURE: sharing check failed: $test_result"
+        return 1
+    fi
+}
+
+if [ "$1" = "test" ]; then
+    if [ $# -lt 2 ]; then
+        echo "Usage: $0 test <remote_host>"
+        exit 1
+    fi
+    remote_host=$2
+    test_sharing localhost $remote_host
+    echo ""
+    test_sharing $remote_host localhost
+    exit 0
+fi
+
+if [ $# -lt 1 ]; then
+    echo "Usage: $0 <host1> [host2] ..."
+    exit 1
+fi
+
+echo "=== Step 1: Installing build dependencies ==="
+sudo dnf builddep -y dnf-plugin-p2p.spec
+
+echo "=== Step 2: Building RPMs locally ==="
+make rpm
+
+# Locate built RPMs
+RPMS=$(find build/rpmbuild/RPMS/ -name '*.rpm' 2>/dev/null)
+if [ -z "$RPMS" ]; then
+    echo "Error: No RPM packages found in build/rpmbuild/RPMS/ after build."
+    exit 1
+fi
+
+for host in "$@"; do
+    echo "=== Processing host: $host ==="
+    if [ "$host" = "localhost" ]; then
+        # Local installation
+        echo "Installing RPMs locally..."
+        if rpm -q dnf-plugin-p2p >/dev/null 2>&1; then
+            sudo dnf reinstall -y $RPMS
+        else
+            sudo dnf install -y --best --allowerasing $RPMS
+        fi
+        
+        echo "Restarting service..."
+        sudo systemctl restart dnf-p2p-proxy.service
+        
+        echo "Diagnosing..."
+        success=false
+        for i in {1..5}; do
+            if curl -s --max-time 1 http://localhost:8888/ping | grep -q "pong"; then
+                success=true
+                break
+            fi
+            echo "Waiting for proxy HTTP server to start (attempt $i/5)..."
+            sleep 1
+        done
+
+        if [ "$success" = true ]; then
+            echo "SUCCESS: dnf-p2p-proxy is active and responding pong on localhost"
+        else
+            echo "ERROR: dnf-p2p-proxy failed to respond on localhost"
+            sudo systemctl status dnf-p2p-proxy.service
+        fi
+    else
+        # Remote installation
+        echo "Copying RPMs to $host..."
+        ssh "$host" "mkdir -p /tmp/p2p-rpms"
+        scp -q $RPMS "$host":/tmp/p2p-rpms/
+        
+        echo "Installing RPMs on $host..."
+        if ssh "$host" "rpm -q dnf-plugin-p2p >/dev/null 2>&1"; then
+            ssh "$host" "sudo dnf reinstall -y /tmp/p2p-rpms/*.rpm"
+        else
+            ssh "$host" "sudo dnf install -y --best --allowerasing /tmp/p2p-rpms/*.rpm"
+        fi
+        ssh "$host" "rm -rf /tmp/p2p-rpms"
+        
+        echo "Restarting service on $host..."
+        ssh "$host" "sudo systemctl restart dnf-p2p-proxy.service"
+        
+        echo "Diagnosing on $host..."
+        success=false
+        for i in {1..5}; do
+            if ssh "$host" "curl -s --max-time 1 http://localhost:8888/ping" | grep -q "pong"; then
+                success=true
+                break
+            fi
+            echo "Waiting for proxy HTTP server to start on $host (attempt $i/5)..."
+            sleep 1
+        done
+
+        if [ "$success" = true ]; then
+            echo "SUCCESS: dnf-p2p-proxy is active and responding pong on $host"
+        else
+            echo "ERROR: dnf-p2p-proxy failed to respond on $host"
+            ssh "$host" "sudo systemctl status dnf-p2p-proxy.service"
+        fi
+    fi
+    echo ""
+done

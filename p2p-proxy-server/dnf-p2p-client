@@ -104,6 +104,59 @@ def cmd_status(args):
         print(f"Error: An unexpected error occurred: {e}", file=sys.stderr)
         return 1
 
+def cmd_test_transfer(args):
+    host, port = load_config_port(args.config)
+    if args.host:
+        host = args.host
+    if args.port:
+        port = args.port
+
+    filename = args.filename
+    expected_hash = args.hash
+    expected_content = args.expected_content
+    
+    # 1. Register expected hash
+    reg_url = f"http://{host}:{port}/expected_hashes"
+    try:
+        payload = json.dumps({filename: expected_hash}).encode('utf-8')
+        req = urllib.request.Request(
+            reg_url, data=payload,
+            headers={"Content-Type": "application/json"},
+            method="POST"
+        )
+        with urllib.request.urlopen(req, timeout=5) as response:
+            if response.status != 200 or response.read() != b"OK":
+                print(f"Error: Failed to register expected hash with proxy at {reg_url}.", file=sys.stderr)
+                return 1
+    except Exception as e:
+        print(f"Error registering hash with proxy: {e}", file=sys.stderr)
+        return 1
+
+    # 2. Download package
+    dl_url = f"http://{host}:{port}/packages/{filename}"
+    try:
+        req = urllib.request.Request(dl_url)
+        with urllib.request.urlopen(req, timeout=10) as response:
+            if response.status == 200:
+                data = response.read()
+                if expected_content:
+                    if data.decode('utf-8', errors='ignore') == expected_content:
+                        print("VERIFIED")
+                        return 0
+                    else:
+                        print("ERROR: content mismatch", file=sys.stderr)
+                        return 1
+                else:
+                    print(f"SUCCESS: Package {filename} downloaded ({len(data)} bytes)")
+                    return 0
+            else:
+                print(f"Error: Proxy returned status {response.status}", file=sys.stderr)
+                return 1
+    except Exception as e:
+        print(f"Error downloading package: {e}", file=sys.stderr)
+        return 1
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Command-line client for DNF P2P package sharing proxy"
@@ -116,10 +169,17 @@ def main():
     
     status_parser = subparsers.add_parser("status", help="Get daemon status and statistics")
     
+    test_transfer_parser = subparsers.add_parser("test-transfer", help="Run diagnostic package transfer test")
+    test_transfer_parser.add_argument("--filename", required=True, help="Test package filename")
+    test_transfer_parser.add_argument("--hash", required=True, help="Expected SHA-256 hash of the package")
+    test_transfer_parser.add_argument("--expected-content", default=None, help="Expected content of dummy package file")
+    
     args = parser.parse_args()
     
     if args.command == "status" or not args.command:
         sys.exit(cmd_status(args))
+    elif args.command == "test-transfer":
+        sys.exit(cmd_test_transfer(args))
     else:
         parser.print_help()
         sys.exit(0)

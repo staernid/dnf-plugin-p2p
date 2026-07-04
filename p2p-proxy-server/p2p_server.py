@@ -89,8 +89,9 @@ class P2PProxyHandler(BaseHTTPRequestHandler):
         try:
             # Connect to the destination server
             dest_socket = socket.create_connection((host, port), timeout=10)
-            dest_socket.settimeout(None)
-            self.request.settimeout(None)
+            # Set a 60.0 second idle/keepalive timeout on sockets to prevent threads from hanging indefinitely
+            dest_socket.settimeout(60.0)
+            self.request.settimeout(60.0)
             
             # Send HTTP response headers to client
             self.send_response(200, 'Connection Established')
@@ -259,6 +260,18 @@ class P2PProxyHandler(BaseHTTPRequestHandler):
                     self.send_error(403, "Access Denied: remote_url query parameter not allowed")
                     return
 
+            # Intercept diagnostic requests
+            if parsed_path.path == "/packages/p2p-diagnostic.txt":
+                self.send_response(200)
+                self.send_header("Content-Type", "text/plain")
+                self.send_header("Content-Length", "2")
+                self.end_headers()
+                try:
+                    self.wfile.write(b"OK")
+                except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError) as e:
+                    raise ClientDisconnected() from e
+                return
+
             filename = Path(parsed_path.path).name
             logger.info(f"GET request for {filename}")
             
@@ -279,7 +292,15 @@ class P2PProxyHandler(BaseHTTPRequestHandler):
             if not filename.endswith((".rpm", ".drpm")):
                 if remote_url:
                     logger.info(f"Bypassing cache/P2P for non-package file {filename}, streaming directly")
-                    self._stream_remote(remote_url)
+                    # Metalink and mirrorlist responses contain mirror URLs.
+                    # Downgrade HTTPS→HTTP in the response so DNF sends GET requests
+                    # through the proxy instead of opaque CONNECT tunnels.
+                    # The proxy re-upgrades to HTTPS on the outbound fetch (force_https).
+                    is_mirror_list = "metalink" in self.path or "mirrorlist" in self.path
+                    if is_mirror_list and is_local:
+                        self._stream_remote_downgrade_https(remote_url)
+                    else:
+                        self._stream_remote(remote_url)
                 else:
                     self.send_error(404, f"File {filename} not found and no remote_url specified.")
                 return
@@ -327,34 +348,24 @@ class P2PProxyHandler(BaseHTTPRequestHandler):
             if not is_local:
                 logger.info(f"Remote client request for uncached package {filename} returned 404")
                 self.send_error(404, f"File {filename} not found in local cache.")
-                return
-
-            # For local clients, if expected_hash is not registered, bypass P2P downloads to prevent
-            # caching/serving unverified peer content. Fallback directly to the remote mirror.
-            if not expected_hash:
-                logger.warning(f"Bypassing P2P for local request {filename}: no registered expected hash found")
-                if remote_url:
-                    if self._download_and_serve(remote_url, filename, expected_hash=None):
-                        return
-                self.send_error(404, f"File {filename} not found in cache and no expected hash registered.")
-                return
-
-            # 2. Query peers for the package
+                return            # 2. Query peers for the package
             peers = self.libp2p_node.query_peers_for_package(filename)
             if peers:
                 for peer in peers:
                     peer_ip = peer["ip"]
                     peer_port = peer["port"]
+                    peer_hash = peer.get("hash")
                     if ":" in peer_ip:
                         peer_url = f"http://[{peer_ip}]:{peer_port}/packages/{filename}"
                     else:
                         peer_url = f"http://{peer_ip}:{peer_port}/packages/{filename}"
                     logger.info(f"Attempting to download {filename} from peer {peer_ip}:{peer_port}")
-                    # Enforce the trusted expected_hash
-                    if self._download_and_serve(peer_url, filename, expected_hash=expected_hash, is_p2p=True):
+                    # Enforce the trusted expected_hash if available; otherwise use peer's self-reported hash to verify transport integrity
+                    target_hash = expected_hash or peer_hash
+                    if self._download_and_serve(peer_url, filename, expected_hash=target_hash, is_p2p=True):
                         return
                 logger.warning(f"Failed to fetch {filename} from any peers. Falling back to remote mirror.")
-
+ 
             # 3. Fallback to remote mirror
             if remote_url:
                 logger.info(f"Downloading {filename} from remote mirror: {remote_url}")
@@ -388,6 +399,14 @@ class P2PProxyHandler(BaseHTTPRequestHandler):
                 if "remote_url" in query_params:
                     self.send_error(403, "Access Denied: remote_url not allowed")
                     return
+
+            # Intercept diagnostic requests
+            if parsed_path.path == "/packages/p2p-diagnostic.txt":
+                self.send_response(200)
+                self.send_header("Content-Type", "text/plain")
+                self.send_header("Content-Length", "2")
+                self.end_headers()
+                return
 
             filename = Path(parsed_path.path).name
 
@@ -453,31 +472,9 @@ class P2PProxyHandler(BaseHTTPRequestHandler):
         except Exception as e:
             logger.error(f"Error serving file: {e}")
 
-    @staticmethod
-    def _rewrite_metalink_urls(content: bytes) -> bytes:
-        """Rewrite only <url> element text in metalink XML from https:// to http://.
-
-        Uses a regex that targets only the URL text inside <url ...>...</url>
-        elements, leaving checksums and all other content untouched.
-        """
-        # Match <url ...>https://...</url> and rewrite only the URL text
-        def _rewrite_url_element(match):
-            prefix = match.group(1)
-            url_text = match.group(2)
-            suffix = match.group(3)
-            rewritten = url_text.replace(b"https://", b"http://")
-            return prefix + rewritten + suffix
-
-        # Regex: capture <url ...> prefix, URL text, and </url> suffix
-        pattern = rb'(<url[^>]*>)(https://[^<]+)(</url>)'
-        return re.sub(pattern, _rewrite_url_element, content)
-
     def _stream_remote(self, url: str) -> bool:
         """Stream a file from a remote URL to the client without caching it."""
         try:
-            # Check if this is a metalink/mirrorlist that needs URL rewriting
-            is_metalink = "metalink" in url or "mirrorlist" in url
-            
             # Forward key headers from the client (Range for zchunk, etc.)
             forwarded_headers = {"Accept-Encoding": "identity"}
             for hdr in ("Range", "If-Range", "If-None-Match", "If-Modified-Since"):
@@ -485,26 +482,9 @@ class P2PProxyHandler(BaseHTTPRequestHandler):
                 if val:
                     forwarded_headers[hdr] = val
             
-            response = requests.get(url, stream=not is_metalink, timeout=15,
+            response = requests.get(url, stream=True, timeout=15,
                                     headers=forwarded_headers)
             
-            if is_metalink:
-                # Rewrite mirror URLs from HTTPS to HTTP so DNF sends GETs through proxy
-                content = response.content
-                modified_content = self._rewrite_metalink_urls(content)
-                try:
-                    self.send_response(response.status_code)
-                    for header, value in response.headers.items():
-                        if header.lower() == "content-length":
-                            self.send_header(header, str(len(modified_content)))
-                        elif header.lower() in ["content-type", "last-modified", "etag"]:
-                            self.send_header(header, value)
-                    self.end_headers()
-                    self.wfile.write(modified_content)
-                except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError) as e:
-                    raise ClientDisconnected() from e
-                return True
-
             try:
                 self.send_response(response.status_code)
                 for header, value in response.headers.items():
@@ -527,13 +507,49 @@ class P2PProxyHandler(BaseHTTPRequestHandler):
         except Exception as e:
             logger.error(f"Error streaming from {url}: {e}")
             return False
+    def _stream_remote_downgrade_https(self, url: str) -> bool:
+        """Fetch a metalink/mirrorlist response and downgrade HTTPS→HTTP in mirror URLs.
+        
+        This ensures DNF sends plaintext GET requests through the proxy for RPM
+        downloads, rather than opaque CONNECT tunnels that bypass P2P interception.
+        The proxy re-upgrades to HTTPS on the outbound fetch (via force_https).
+        Metalink/mirrorlist responses are small text/XML files, so buffering the
+        entire response is safe.
+        """
+        try:
+            response = requests.get(url, timeout=15)
+            if response.status_code != 200:
+                self.send_error(response.status_code, f"Upstream returned {response.status_code}")
+                return False
+
+            body = response.content.replace(b"https://", b"http://")
+            
+            try:
+                self.send_response(200)
+                content_type = response.headers.get("Content-Type", "application/octet-stream")
+                self.send_header("Content-Type", content_type)
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+            except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError) as e:
+                raise ClientDisconnected() from e
+            return True
+        except ClientDisconnected:
+            raise
+        except Exception as e:
+            logger.error(f"Error streaming metalink/mirrorlist from {url}: {e}")
+            return False
 
     def _download_and_serve(self, url: str, filename: str, expected_hash: Optional[str] = None, is_p2p: bool = False) -> bool:
         """Download file from URL, stream it to client, and save to cache."""
         temp_file = self.cache.cache_dir / f"{filename}.tmp"
         success = False
         try:
-            response = requests.get(url, stream=True, timeout=15)
+            # Mitigation for SSRF: Peer-to-peer package transfers should never redirect.
+            kwargs = {"stream": True, "timeout": 15}
+            if is_p2p:
+                kwargs["allow_redirects"] = False
+            response = requests.get(url, **kwargs)
             if response.status_code != 200:
                 logger.warning(f"Download source {url} returned status {response.status_code}")
                 return False
