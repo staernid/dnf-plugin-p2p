@@ -1,0 +1,37 @@
+From: dnf-plugin-p2p contributors <none@example.com>
+Subject: [PATCH] Fix PeerStoreError crash in maybe_delete_peer_record
+
+When the peerstore's garbage collection runs via maybe_delete_peer_record(),
+calling self.addrs(peer_id) can raise PeerStoreError if the peer's data
+has already expired or been removed from peer_data_map. The unhandled
+exception crashes the entire libp2p event loop and kills the proxy daemon.
+
+This patch wraps the addrs() call in a try/except for PeerStoreError.
+If the error is raised, the peer record is removed since the peer has
+no valid addresses anyway.
+
+Upstream bug: https://github.com/libp2p/py-libp2p/issues/XXXX
+
+---
+ libp2p/peer/peerstore.py | 8 ++++++--
+ 1 file changed, 6 insertions(+), 2 deletions(-)
+
+diff --git a/libp2p/peer/peerstore.py b/libp2p/peer/peerstore.py
+index 54602937..d26a70fb 100644
+--- a/libp2p/peer/peerstore.py
++++ b/libp2p/peer/peerstore.py
+@@ -335,7 +335,11 @@ class PeerStore(IPeerStore):
+         :param peer_id: The peer whose record we may delete/
+         """
+         if peer_id in self.peer_record_map:
+-            if not self.addrs(peer_id):
++            try:
++                if not self.addrs(peer_id):
++                    self.peer_record_map.pop(peer_id, None)
++            except PeerStoreError:
++                # If the peer ID is expired or not found, it has no valid addresses, so remove its record.
+                 self.peer_record_map.pop(peer_id, None)
+ 
+     def consume_peer_record(self, envelope: Envelope, ttl: int) -> bool:
+-- 
+2.49.0

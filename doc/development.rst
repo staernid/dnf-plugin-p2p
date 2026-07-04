@@ -10,6 +10,7 @@ Project Structure
 * ``systemd/``: Systemd service configuration files.
 * ``doc/``: Sphinx documentation source files.
 * ``dnf-p2p-helper``: Deployment, verification, and LAN testing CLI helper.
+* ``patches/``: Patch files applied to bundled dependencies (e.g. py-libp2p) during RPM build.
 
 
 Coding & Concurrency Guidelines
@@ -64,6 +65,59 @@ Triggers a bidirectional P2P package sharing test between the local host and a r
 .. code-block:: bash
 
     ./dnf-p2p-helper test t495s
+
+
+Upstream Patches (py-libp2p)
+----------------------------
+
+We carry local patches against the bundled ``py-libp2p`` submodule in the ``patches/`` directory.
+These fix upstream bugs that have not yet been merged.
+
+Current patches:
+
+* ``0001-fix-peerstore-crash-on-expired-peer-gc.patch``: Fixes a crash in
+  ``PeerStore.maybe_delete_peer_record()`` where ``self.addrs()`` raises
+  ``PeerStoreError`` for expired peers, killing the libp2p event loop and the
+  entire proxy daemon.
+
+**How patches are applied:**
+
+* **RPM build** (``make rpm``): The spec file declares each patch as a ``Source``
+  (e.g. ``Source10:``) and applies it with ``patch -p1`` to the bundled libp2p
+  install tree during ``%install`` (after ``pip install``).
+  The ``make srpm`` target automatically copies ``patches/*.patch`` into
+  ``build/rpmbuild/SOURCES/``.
+
+* **Local development** (``make patch-libp2p``): Runs ``git apply`` for each
+  patch file against the ``py-libp2p-src/`` submodule. Already-applied patches
+  are skipped.
+
+**Updating the submodule:**
+
+.. code-block:: bash
+
+    # 1. Fetch and checkout latest upstream
+    cd py-libp2p-src
+    git fetch origin
+    git checkout origin/main
+
+    # 2. Re-apply patches
+    cd ..
+    make patch-libp2p
+
+    # 3. If a patch fails (upstream fixed the bug), remove it from patches/
+    #    and delete the SourceN line from dnf-plugin-p2p.spec
+
+    # 4. Stage the updated submodule pointer
+    git add py-libp2p-src
+
+**Adding a new patch:**
+
+1. Make your fix inside ``py-libp2p-src/``.
+2. Generate a patch: ``cd py-libp2p-src && git diff > ../patches/NNNN-short-description.patch``
+3. Add a ``SourceN:`` line to ``dnf-plugin-p2p.spec`` (use the next available number).
+4. Add a corresponding ``patch -p1 --no-backup-if-mismatch < %{SOURCEN}`` line in the ``%install`` section.
+5. Document the patch in this file.
 
 
 Versioning and GitOps

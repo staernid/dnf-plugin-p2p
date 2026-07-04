@@ -18,6 +18,10 @@ Source7:        https://files.pythonhosted.org/packages/39/5b/99ee4dd6080d857f02
 Source8:        https://github.com/libp2p/py-libp2p/archive/e11ec4c173028af04637dc499de6521b6704253f/libp2p-0.6.0.tar.gz
 Source9:        https://files.pythonhosted.org/packages/source/p/pycryptodome/pycryptodome-3.20.0.tar.gz
 
+# Patches for bundled py-libp2p (applied during %install, not %prep)
+# See patches/0001-fix-peerstore-crash-on-expired-peer-gc.patch for details
+Source10:       0001-fix-peerstore-crash-on-expired-peer-gc.patch
+
 BuildRequires:  cmake >= 3.5.0
 BuildRequires:  python3-sphinx
 BuildRequires:  python3-devel
@@ -103,6 +107,11 @@ python3 -m pip install \
     --no-build-isolation \
     --no-deps \
     fastecdsa py-multibase py-multihash py-multicodec py-cid trio-typing rpcudp libp2p pycryptodome
+
+# Apply patches to bundled py-libp2p after pip install
+pushd %{buildroot}%{_libexecdir}/%{name}
+patch -p1 --no-backup-if-mismatch < %{SOURCE10}
+popd
 
 mkdir -p %{buildroot}%{_localstatedir}/cache/dnf-plugin-p2p
 
