@@ -2,7 +2,7 @@
 %{!?dnf_lowest_compatible: %global dnf_lowest_compatible 4.4.3}
 
 Name:           dnf-plugin-p2p
-Version:        0.3.3
+Version:        0.3.4
 Release:        1%{?dist}
 Summary:        Peer-to-peer package sharing plugin for libdnf5
 License:        GPL-2.0-or-later
@@ -153,6 +153,9 @@ fi
 %systemd_postun_with_restart dnf-p2p-proxy.service
 
 %changelog
+* Sat Jul 04 2026 dnf-plugin-p2p contributors <none@example.com> - 0.3.4-1
+- Release 0.3.4
+
 * Sun Jun 21 2026 dnf-plugin-p2p contributors <none@example.com> - 0.3.3-1
 - Release 0.3.3
 
