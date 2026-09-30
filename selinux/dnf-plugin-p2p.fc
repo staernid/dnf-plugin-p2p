@@ -1,0 +1,2 @@
+/usr/libexec/dnf-plugin-p2p/p2p_server\.py    --    gen_context(system_u:object_r:dnf_p2p_exec_t,s0)
+/var/cache/dnf-plugin-p2p(/.*)?                    gen_context(system_u:object_r:dnf_p2p_cache_t,s0)

@@ -200,3 +200,33 @@ def test_index_auto_healing(temp_cache_dir):
     assert "some_hash" in cache.index
     assert cache.index["some_hash"]["size"] == pkg_file.stat().st_size
     assert "last_accessed" in cache.index["some_hash"]
+
+
+def test_concurrent_cache_access(temp_cache_dir):
+    import threading
+    cache = P2PCache(temp_cache_dir, max_cache_size_mb=10, max_disk_usage_percent=0)
+    errors = []
+
+    def worker(worker_id):
+        try:
+            for i in range(10):
+                file_name = f"thread_{worker_id}_pkg_{i}.rpm"
+                file_path = temp_cache_dir / file_name
+                file_path.write_bytes(f"thread_{worker_id}_{i}".encode() * 1024)
+                h = cache.get_file_hash(file_path)
+                assert cache.add_to_cache(file_path, package_hash=h, package_info={"filename": file_name})
+                lookup = cache.lookup_filename(file_name)
+                assert lookup is not None
+                cached_f = cache.get_cached_file(h)
+                assert cached_f is not None
+        except Exception as e:
+            errors.append(e)
+
+    threads = [threading.Thread(target=worker, args=(t,)) for t in range(8)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert not errors, f"Errors during concurrent cache access: {errors}"
+

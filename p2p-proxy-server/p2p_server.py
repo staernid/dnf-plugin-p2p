@@ -7,8 +7,10 @@
 
 import argparse
 import hashlib
+import ipaddress
 import logging
 import os
+import secrets
 import socket
 import sys
 import threading
@@ -16,10 +18,11 @@ import urllib.parse
 import json
 import re
 import requests
+import concurrent.futures
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from socketserver import ThreadingMixIn
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Dict, List, Any, Tuple, Union, cast
 from configparser import ConfigParser
 
 
@@ -40,12 +43,14 @@ class ClientDisconnected(Exception):
 class P2PProxyHandler(BaseHTTPRequestHandler):
     """HTTP request handler for P2P package proxy."""
     
-    cache: P2PCache = None
-    libp2p_node: P2PLibp2pNode = None
+    cache: Optional[P2PCache] = None
+    libp2p_node: Optional[P2PLibp2pNode] = None
     force_https: bool = True
+    cluster_token: Optional[str] = None
+    swarm_threshold: int = 50 * 1024 * 1024  # 50 MB default for swarm chunking
 
     # Map of filename -> expected_hash registered by local DNF instances
-    expected_hashes = {}
+    expected_hashes: Dict[str, str] = {}
     expected_hashes_lock = threading.Lock()
 
     # Stats tracking (thread-safe)
@@ -250,6 +255,13 @@ class P2PProxyHandler(BaseHTTPRequestHandler):
 
             # Authorize remote clients
             if not is_local:
+                if self.cluster_token:
+                    client_token = self.headers.get("X-Cluster-Token", "")
+                    if not secrets.compare_digest(client_token, self.cluster_token):
+                        logger.warning(f"Unauthorized remote request from {self.client_address[0]}: invalid or missing X-Cluster-Token")
+                        self.send_error(401, "Unauthorized: Invalid or missing cluster token")
+                        return
+
                 if not parsed_path.path.startswith("/packages/"):
                     logger.warning(f"Rejected unauthorized remote request to path: {parsed_path.path}")
                     self.send_error(403, "Access Denied: Path not allowed")
@@ -284,7 +296,12 @@ class P2PProxyHandler(BaseHTTPRequestHandler):
             # Automatically upgrade HTTP mirror URLs to HTTPS to secure internet traffic
             if self.force_https and remote_url and remote_url.startswith("http://"):
                 parsed_remote = urllib.parse.urlparse(remote_url)
-                if parsed_remote.hostname not in ("127.0.0.1", "localhost"):
+                hostname = parsed_remote.hostname or ""
+                if (
+                    hostname not in ("127.0.0.1", "localhost", "mock-repo")
+                    and not hostname.endswith(".local")
+                    and not hostname.endswith(".internal")
+                ):
                     remote_url = remote_url.replace("http://", "https://", 1)
 
             # Only cache and peer-query package files (.rpm, .drpm).
@@ -308,6 +325,10 @@ class P2PProxyHandler(BaseHTTPRequestHandler):
             # Retrieve expected hash if registered by local DNF
             with P2PProxyHandler.expected_hashes_lock:
                 expected_hash = P2PProxyHandler.expected_hashes.get(filename)
+
+            if not self.cache:
+                self.send_error(500, "Cache not initialized")
+                return
 
             # 1. Check if package is in local cache
             cache_file = self.cache.get_cached_file_by_name(filename)
@@ -348,10 +369,45 @@ class P2PProxyHandler(BaseHTTPRequestHandler):
             if not is_local:
                 logger.info(f"Remote client request for uncached package {filename} returned 404")
                 self.send_error(404, f"File {filename} not found in local cache.")
-                return            # 2. Query peers for the package
-            peers = self.libp2p_node.query_peers_for_package(filename)
+                return
+
+            # 2. Query peers for the package
+            peers = self.libp2p_node.query_peers_for_package(filename) if self.libp2p_node else []
             if peers:
+                valid_peers: List[Dict[str, Any]] = []
                 for peer in peers:
+                    peer_ip = peer.get("ip")
+                    peer_port = peer.get("port")
+                    if not peer_ip or not peer_port:
+                        continue
+                    # SSRF Protection: Validate peer port and IP
+                    try:
+                        port_num = int(peer_port)
+                        if port_num < 1024 or port_num > 65535:
+                            logger.warning(f"Ignoring peer with invalid/privileged port: {peer_port}")
+                            continue
+                        parsed_ip = ipaddress.ip_address(peer_ip)
+                        if parsed_ip.is_loopback or parsed_ip.is_link_local or parsed_ip.is_multicast or parsed_ip.is_unspecified or parsed_ip.is_reserved:
+                            logger.warning(f"Ignoring peer with non-routable IP: {peer_ip}")
+                            continue
+                        if peer_ip == "169.254.169.254":
+                            logger.warning(f"Ignoring peer with metadata service IP: {peer_ip}")
+                            continue
+                        valid_peers.append(peer)
+                    except Exception as e:
+                        logger.warning(f"Ignoring invalid peer address {peer_ip}:{peer_port}: {e}")
+                        continue
+
+                # Swarm Download: If 2+ valid peers available and package exceeds swarm_threshold
+                pkg_size = int(valid_peers[0].get("size", 0)) if valid_peers else 0
+                target_hash = expected_hash or (valid_peers[0].get("hash") if valid_peers else None)
+                if len(valid_peers) >= 2 and pkg_size >= self.swarm_threshold and target_hash:
+                    logger.info(f"Initiating swarm download for {filename} ({pkg_size} bytes) across {len(valid_peers)} peers")
+                    if self._download_swarm(valid_peers, filename, target_hash, pkg_size):
+                        return
+                    logger.warning(f"Swarm download for {filename} failed. Falling back to sequential peer download.")
+
+                for peer in valid_peers:
                     peer_ip = peer["ip"]
                     peer_port = peer["port"]
                     peer_hash = peer.get("hash")
@@ -360,9 +416,9 @@ class P2PProxyHandler(BaseHTTPRequestHandler):
                     else:
                         peer_url = f"http://{peer_ip}:{peer_port}/packages/{filename}"
                     logger.info(f"Attempting to download {filename} from peer {peer_ip}:{peer_port}")
-                    # Enforce the trusted expected_hash if available; otherwise use peer's self-reported hash to verify transport integrity
-                    target_hash = expected_hash or peer_hash
-                    if self._download_and_serve(peer_url, filename, expected_hash=target_hash, is_p2p=True):
+                    # Enforce the trusted expected_hash if available; otherwise use peer's self-reported hash
+                    peer_target_hash = expected_hash or peer_hash
+                    if self._download_from_peer(peer_url, filename, expected_hash=peer_target_hash):
                         return
                 logger.warning(f"Failed to fetch {filename} from any peers. Falling back to remote mirror.")
  
@@ -392,6 +448,12 @@ class P2PProxyHandler(BaseHTTPRequestHandler):
 
             # Authorize remote clients
             if not is_local:
+                if self.cluster_token:
+                    client_token = self.headers.get("X-Cluster-Token", "")
+                    if not secrets.compare_digest(client_token, self.cluster_token):
+                        self.send_error(401, "Unauthorized: Invalid or missing cluster token")
+                        return
+
                 if not parsed_path.path.startswith("/packages/"):
                     self.send_error(403, "Access Denied: Path not allowed")
                     return
@@ -419,16 +481,22 @@ class P2PProxyHandler(BaseHTTPRequestHandler):
             # Automatically upgrade HTTP mirror URLs to HTTPS to secure internet traffic
             if self.force_https and remote_url and remote_url.startswith("http://"):
                 parsed_remote = urllib.parse.urlparse(remote_url)
-                if parsed_remote.hostname not in ("127.0.0.1", "localhost"):
+                hostname = parsed_remote.hostname or ""
+                if (
+                    hostname not in ("127.0.0.1", "localhost", "mock-repo")
+                    and not hostname.endswith(".local")
+                    and not hostname.endswith(".internal")
+                ):
                     remote_url = remote_url.replace("http://", "https://", 1)
 
             # Check local cache (only if it is a package file)
-            if filename.endswith((".rpm", ".drpm")):
+            if filename.endswith((".rpm", ".drpm")) and self.cache:
                 cache_file = self.cache.get_cached_file_by_name(filename)
                 if cache_file:
                     self.send_response(200)
                     self.send_header("Content-Type", "application/x-redhat-package-manager")
                     self.send_header("Content-Length", str(cache_file.stat().st_size))
+                    self.send_header("Accept-Ranges", "bytes")
                     self.end_headers()
                     return
 
@@ -454,19 +522,95 @@ class P2PProxyHandler(BaseHTTPRequestHandler):
         except Exception as e:
             logger.error(f"Error in do_HEAD: {e}")
 
-    def _serve_file(self, file_path: Path):
-        """Helper to serve a file from disk."""
+    def _parse_range_header(self, range_header: str, file_size: int):
+        """
+        Parses an HTTP Range header (e.g., 'bytes=0-499', 'bytes=500-', 'bytes=-500').
+        Returns (start, end) tuple of byte indices (inclusive) if valid, or None if unsatisfiable.
+        """
+        if not range_header or not range_header.startswith("bytes="):
+            return None
+        range_val = range_header[6:].strip()
+        if "," in range_val:
+            return None
+        parts = range_val.split("-", 1)
+        if len(parts) != 2:
+            return None
+        start_str, end_str = parts[0].strip(), parts[1].strip()
+
         try:
-            self.send_response(200)
-            self.send_header("Content-Type", "application/x-redhat-package-manager")
-            self.send_header("Content-Length", str(file_path.stat().st_size))
-            self.end_headers()
-            with open(file_path, 'rb') as f:
-                while chunk := f.read(65536):
-                    try:
-                        self.wfile.write(chunk)
-                    except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError) as e:
-                        raise ClientDisconnected() from e
+            if start_str == "" and end_str != "":
+                suffix_len = int(end_str)
+                if suffix_len <= 0 or file_size == 0:
+                    return None
+                start = max(0, file_size - suffix_len)
+                end = file_size - 1
+            elif start_str != "" and end_str == "":
+                start = int(start_str)
+                if start < 0 or start >= file_size:
+                    return None
+                end = file_size - 1
+            elif start_str != "" and end_str != "":
+                start = int(start_str)
+                end = int(end_str)
+                if start < 0 or start > end or start >= file_size:
+                    return None
+                end = min(end, file_size - 1)
+            else:
+                return None
+            return (start, end)
+        except ValueError:
+            return None
+
+    def _serve_file(self, file_path: Path):
+        """Helper to serve a file from disk, supporting HTTP Range requests."""
+        try:
+            file_size = file_path.stat().st_size
+            range_header = self.headers.get("Range")
+
+            if range_header:
+                byte_range = self._parse_range_header(range_header, file_size)
+                if byte_range is None:
+                    self.send_response(416, "Range Not Satisfiable")
+                    self.send_header("Content-Range", f"bytes */{file_size}")
+                    self.send_header("Content-Length", "0")
+                    self.send_header("Accept-Ranges", "bytes")
+                    self.end_headers()
+                    return
+
+                start, end = byte_range
+                content_len = end - start + 1
+                self.send_response(206, "Partial Content")
+                self.send_header("Content-Type", "application/x-redhat-package-manager")
+                self.send_header("Content-Range", f"bytes {start}-{end}/{file_size}")
+                self.send_header("Content-Length", str(content_len))
+                self.send_header("Accept-Ranges", "bytes")
+                self.end_headers()
+
+                with open(file_path, 'rb') as f:
+                    f.seek(start)
+                    remaining = content_len
+                    while remaining > 0:
+                        chunk_size = min(65536, remaining)
+                        chunk = f.read(chunk_size)
+                        if not chunk:
+                            break
+                        try:
+                            self.wfile.write(chunk)
+                        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError) as e:
+                            raise ClientDisconnected() from e
+                        remaining -= len(chunk)
+            else:
+                self.send_response(200)
+                self.send_header("Content-Type", "application/x-redhat-package-manager")
+                self.send_header("Content-Length", str(file_size))
+                self.send_header("Accept-Ranges", "bytes")
+                self.end_headers()
+                with open(file_path, 'rb') as f:
+                    while chunk := f.read(65536):
+                        try:
+                            self.wfile.write(chunk)
+                        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError) as e:
+                            raise ClientDisconnected() from e
         except ClientDisconnected:
             raise
         except Exception as e:
@@ -540,53 +684,181 @@ class P2PProxyHandler(BaseHTTPRequestHandler):
             logger.error(f"Error streaming metalink/mirrorlist from {url}: {e}")
             return False
 
+    def _download_swarm(self, peers: List[Dict[str, Any]], filename: str, expected_hash: str, file_size: int) -> bool:
+        """Download distinct byte ranges of a large package concurrently from multiple peers."""
+        if not self.cache:
+            return False
+        temp_file = self.cache.cache_dir / f"{filename}.tmp"
+        num_chunks = min(len(peers), 4)
+        chunk_size = (file_size + num_chunks - 1) // num_chunks
+
+        ranges = []
+        for i in range(num_chunks):
+            start = i * chunk_size
+            end = min(file_size - 1, (i + 1) * chunk_size - 1)
+            ranges.append((start, end, peers[i]))
+
+        logger.info(f"Divided {filename} into {len(ranges)} chunks for swarm download: {[(r[0], r[1]) for r in ranges]}")
+
+        def fetch_range(start: int, end: int, peer: Dict[str, Any]) -> Optional[bytes]:
+            peer_ip = peer["ip"]
+            peer_port = peer["port"]
+            peer_url = f"http://[{peer_ip}]:{peer_port}/packages/{filename}" if ":" in peer_ip else f"http://{peer_ip}:{peer_port}/packages/{filename}"
+            headers = {"Range": f"bytes={start}-{end}"}
+            if self.cluster_token:
+                headers["X-Cluster-Token"] = self.cluster_token
+            try:
+                resp = requests.get(peer_url, headers=headers, stream=True, timeout=15, allow_redirects=False)
+                if resp.status_code in (200, 206):
+                    data = resp.content
+                    expected_len = end - start + 1
+                    if len(data) == expected_len:
+                        return data
+                    logger.warning(f"Chunk size mismatch from {peer_url}: expected {expected_len}, got {len(data)}")
+            except Exception as e:
+                logger.warning(f"Failed to fetch range {start}-{end} from {peer_url}: {e}")
+            return None
+
+        chunks: List[Optional[bytes]] = [None] * len(ranges)
+        with concurrent.futures.ThreadPoolExecutor(max_workers=num_chunks) as executor:
+            future_to_idx = {
+                executor.submit(fetch_range, r[0], r[1], r[2]): idx
+                for idx, r in enumerate(ranges)
+            }
+            for future in concurrent.futures.as_completed(future_to_idx):
+                idx = future_to_idx[future]
+                try:
+                    chunks[idx] = future.result()
+                except Exception as e:
+                    logger.warning(f"Swarm chunk {idx} raised exception: {e}")
+                    return False
+
+        if any(c is None for c in chunks):
+            logger.warning("One or more swarm chunks failed to download")
+            return False
+
+        full_content = b"".join(cast(List[bytes], chunks))
+        hasher = hashlib.sha256(full_content)
+        downloaded_hash = hasher.hexdigest()
+        if downloaded_hash != expected_hash:
+            logger.warning(f"Swarm download hash mismatch for {filename}: expected {expected_hash}, got {downloaded_hash}")
+            return False
+
+        # Transmit to client
+        try:
+            self.send_response(200)
+            self.send_header("Content-Type", "application/x-redhat-package-manager")
+            self.send_header("Content-Length", str(len(full_content)))
+            self.send_header("Accept-Ranges", "bytes")
+            self.end_headers()
+            self.wfile.write(full_content)
+        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError) as e:
+            raise ClientDisconnected() from e
+
+        # Write to temp file and register in cache
+        try:
+            with open(temp_file, 'wb') as tmp_f:
+                tmp_f.write(full_content)
+            final_file = self.cache.cache_dir / filename
+            temp_file.rename(final_file)
+            self.cache.add_to_cache(final_file, expected_hash, {"source": "swarm"})
+            self.record_p2p_saved(len(full_content))
+            logger.info(f"Successfully cached swarm-downloaded package {filename}")
+            return True
+        except Exception as e:
+            logger.error(f"Failed to save swarm cache file {filename}: {e}")
+            if temp_file.exists():
+                temp_file.unlink()
+            return True  # Payload was already sent to client
+
+    def _download_from_peer(self, peer_url: str, filename: str, expected_hash: Optional[str] = None) -> bool:
+        """Download package from peer via HTTP with peer verification and authentication."""
+        return self._download_and_serve(peer_url, filename, expected_hash=expected_hash, is_p2p=True)
+
     def _download_and_serve(self, url: str, filename: str, expected_hash: Optional[str] = None, is_p2p: bool = False) -> bool:
         """Download file from URL, stream it to client, and save to cache."""
+        if not self.cache:
+            return False
         temp_file = self.cache.cache_dir / f"{filename}.tmp"
         success = False
         try:
             # Mitigation for SSRF: Peer-to-peer package transfers should never redirect.
-            kwargs = {"stream": True, "timeout": 15}
+            kwargs: Dict[str, Any] = {"stream": True, "timeout": 15}
             if is_p2p:
                 kwargs["allow_redirects"] = False
+                if self.cluster_token:
+                    kwargs["headers"] = {"X-Cluster-Token": self.cluster_token}
             response = requests.get(url, **kwargs)
             if response.status_code != 200:
                 logger.warning(f"Download source {url} returned status {response.status_code}")
                 return False
 
-            try:
-                self.send_response(200)
-                self.send_header("Content-Type", "application/x-redhat-package-manager")
-                if "Content-Length" in response.headers:
-                    self.send_header("Content-Length", response.headers["Content-Length"])
-                self.end_headers()
-            except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError) as e:
-                raise ClientDisconnected() from e
-
-            hasher = hashlib.sha256()
-            with open(temp_file, 'wb') as tmp_f:
+            if is_p2p:
+                # Buffer and verify peer transport integrity BEFORE sending headers to client
+                hasher = hashlib.sha256()
+                content_chunks: List[bytes] = []
                 for chunk in response.iter_content(chunk_size=65536):
                     if chunk:
-                        try:
-                            self.wfile.write(chunk)
-                        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError) as e:
-                            raise ClientDisconnected() from e
-                        tmp_f.write(chunk)
+                        content_chunks.append(chunk)
                         hasher.update(chunk)
-            
-            downloaded_hash = hasher.hexdigest()
-            if expected_hash and downloaded_hash != expected_hash:
-                logger.warning(f"Hash mismatch for downloaded file {filename}: expected {expected_hash}, got {downloaded_hash}")
-                raise ClientDisconnected("Hash mismatch detected")
 
-            success = True
-            if is_p2p:
+                downloaded_hash = hasher.hexdigest()
+                if expected_hash and downloaded_hash != expected_hash:
+                    logger.warning(
+                        f"Hash mismatch for downloaded peer file {filename}: expected {expected_hash}, got {downloaded_hash}. Aborting peer download."
+                    )
+                    return False
+
+                content_bytes = b"".join(content_chunks)
+                content_len = len(content_bytes)
+
                 try:
-                    file_size = temp_file.stat().st_size
-                except Exception:
-                    file_size = 0
-                self.record_p2p_saved(file_size)
-            return True
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/x-redhat-package-manager")
+                    self.send_header("Content-Length", str(content_len))
+                    self.send_header("Accept-Ranges", "bytes")
+                    self.end_headers()
+                    self.wfile.write(content_bytes)
+                except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError) as e:
+                    raise ClientDisconnected() from e
+
+                try:
+                    with open(temp_file, 'wb') as tmp_f:
+                        tmp_f.write(content_bytes)
+                except Exception as e:
+                    logger.error(f"Failed to write temp cache file {temp_file}: {e}")
+
+                success = True
+                self.record_p2p_saved(content_len)
+                return True
+            else:
+                try:
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/x-redhat-package-manager")
+                    if "Content-Length" in response.headers:
+                        self.send_header("Content-Length", response.headers["Content-Length"])
+                    self.end_headers()
+                except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError) as e:
+                    raise ClientDisconnected() from e
+
+                hasher = hashlib.sha256()
+                with open(temp_file, 'wb') as tmp_f:
+                    for chunk in response.iter_content(chunk_size=65536):
+                        if chunk:
+                            try:
+                                self.wfile.write(chunk)
+                            except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError) as e:
+                                raise ClientDisconnected() from e
+                            tmp_f.write(chunk)
+                            hasher.update(chunk)
+
+                downloaded_hash = hasher.hexdigest()
+                if expected_hash and downloaded_hash != expected_hash:
+                    logger.warning(f"Hash mismatch for downloaded file {filename}: expected {expected_hash}, got {downloaded_hash}")
+                    raise ClientDisconnected("Hash mismatch detected")
+
+                success = True
+                return True
         except ClientDisconnected:
             raise
         except Exception as e:
@@ -660,7 +932,7 @@ def main():
     except AttributeError:
         is_root = False
 
-    DEFAULT_HOST = "127.0.0.1"
+    DEFAULT_HOST = "0.0.0.0"
     DEFAULT_PORT = 8888
     DEFAULT_LIBP2P_PORT = 8000
     DEFAULT_CACHE_DIR = "/var/cache/dnf-plugin-p2p" if is_root else str(Path.home() / ".cache" / "dnf-plugin-p2p")
@@ -670,6 +942,9 @@ def main():
     DEFAULT_MAX_CACHE_SIZE_MB = 1024
     DEFAULT_MAX_DISK_USAGE_PERCENT = 90.0
     DEFAULT_FORCE_HTTPS = True
+    DEFAULT_CLUSTER_TOKEN = None
+    DEFAULT_QUERY_RATE_LIMIT = 20.0
+    DEFAULT_QUERY_RATE_BURST = 30
 
     parser = argparse.ArgumentParser(
         description="P2P HTTP proxy server for DNF package sharing"
@@ -732,6 +1007,23 @@ def main():
         help=f"Maximum disk usage percentage (default: {DEFAULT_MAX_DISK_USAGE_PERCENT})"
     )
     parser.add_argument(
+        "--cluster-token",
+        default=None,
+        help="Pre-shared key (PSK) cluster token for mutual authentication"
+    )
+    parser.add_argument(
+        "--query-rate-limit",
+        type=float,
+        default=None,
+        help=f"libp2p query rate limit per peer in queries/sec (default: {DEFAULT_QUERY_RATE_LIMIT})"
+    )
+    parser.add_argument(
+        "--query-rate-burst",
+        type=int,
+        default=None,
+        help=f"libp2p query rate limit burst per peer (default: {DEFAULT_QUERY_RATE_BURST})"
+    )
+    parser.add_argument(
         "--no-force-https",
         action="store_false",
         dest="force_https",
@@ -754,15 +1046,23 @@ def main():
             Path("/etc/dnf/plugins/p2p-plugin.conf"),
         ])
 
-    config_values = {}
+    config_values: Dict[str, Any] = {}
     for path in config_paths:
         if path.exists():
             try:
                 config = ConfigParser()
                 config.read(path)
                 if config.has_section("p2p"):
-                    if config.has_option("p2p", "proxy_host"):
-                        config_values["host"] = config.get("p2p", "proxy_host")
+                    if config.has_option("p2p", "bind_host"):
+                        try:
+                            config_values["host"] = config.get("p2p", "bind_host")
+                        except Exception:
+                            pass
+                    if "host" not in config_values and config.has_option("p2p", "proxy_host"):
+                        try:
+                            config_values["host"] = config.get("p2p", "proxy_host")
+                        except Exception:
+                            pass
                     if config.has_option("p2p", "proxy_port"):
                         try:
                             config_values["port"] = config.getint("p2p", "proxy_port")
@@ -805,22 +1105,46 @@ def main():
                             pass
                     if config.has_option("p2p", "cache_dir"):
                         config_values["cache_dir"] = config.get("p2p", "cache_dir")
+                    if config.has_option("p2p", "cluster_token"):
+                        config_values["cluster_token"] = config.get("p2p", "cluster_token")
+                    if config.has_option("p2p", "query_rate_limit"):
+                        try:
+                            config_values["query_rate_limit"] = config.getfloat("p2p", "query_rate_limit")
+                        except ValueError:
+                            pass
+                    if config.has_option("p2p", "query_rate_burst"):
+                        try:
+                            config_values["query_rate_burst"] = config.getint("p2p", "query_rate_burst")
+                        except ValueError:
+                            pass
                 break
             except Exception as e:
                 # Can't use logger yet because logging isn't set up
                 print(f"Warning: Failed to load config from {path}: {e}", file=sys.stderr)
 
     # Merge configuration values
-    host = args.host if args.host is not None else config_values.get("host", DEFAULT_HOST)
-    port = args.port if args.port is not None else config_values.get("port", DEFAULT_PORT)
-    libp2p_port = args.libp2p_port if args.libp2p_port is not None else config_values.get("libp2p_port", DEFAULT_LIBP2P_PORT)
-    cache_dir = args.cache_dir if args.cache_dir is not None else config_values.get("cache_dir", DEFAULT_CACHE_DIR)
-    debug = args.debug if args.debug is not None else config_values.get("debug", DEFAULT_DEBUG)
-    peer_discovery_timeout = args.peer_discovery_timeout if args.peer_discovery_timeout is not None else config_values.get("peer_discovery_timeout", DEFAULT_PEER_DISCOVERY_TIMEOUT)
-    max_parallel_peers = args.max_parallel_peers if args.max_parallel_peers is not None else config_values.get("max_parallel_peers", DEFAULT_MAX_PARALLEL_PEERS)
-    max_cache_size_mb = args.max_cache_size_mb if args.max_cache_size_mb is not None else config_values.get("max_cache_size_mb", DEFAULT_MAX_CACHE_SIZE_MB)
-    max_disk_usage_percent = args.max_disk_usage_percent if args.max_disk_usage_percent is not None else config_values.get("max_disk_usage_percent", DEFAULT_MAX_DISK_USAGE_PERCENT)
-    force_https = args.force_https if args.force_https is not None else config_values.get("force_https", DEFAULT_FORCE_HTTPS)
+    host: str = str(args.host if args.host is not None else config_values.get("host", DEFAULT_HOST))
+    port: int = int(args.port if args.port is not None else config_values.get("port", DEFAULT_PORT))
+    libp2p_port: int = int(args.libp2p_port if args.libp2p_port is not None else config_values.get("libp2p_port", DEFAULT_LIBP2P_PORT))
+    cache_dir: str = str(args.cache_dir if args.cache_dir is not None else config_values.get("cache_dir", DEFAULT_CACHE_DIR))
+    debug: bool = bool(args.debug if args.debug is not None else config_values.get("debug", DEFAULT_DEBUG))
+    peer_discovery_timeout: float = float(args.peer_discovery_timeout if args.peer_discovery_timeout is not None else config_values.get("peer_discovery_timeout", DEFAULT_PEER_DISCOVERY_TIMEOUT))
+    max_parallel_peers: int = int(args.max_parallel_peers if args.max_parallel_peers is not None else config_values.get("max_parallel_peers", DEFAULT_MAX_PARALLEL_PEERS))
+    max_cache_size_mb: int = int(args.max_cache_size_mb if args.max_cache_size_mb is not None else config_values.get("max_cache_size_mb", DEFAULT_MAX_CACHE_SIZE_MB))
+    max_disk_usage_percent: float = float(args.max_disk_usage_percent if args.max_disk_usage_percent is not None else config_values.get("max_disk_usage_percent", DEFAULT_MAX_DISK_USAGE_PERCENT))
+    force_https: bool = bool(args.force_https if args.force_https is not None else config_values.get("force_https", DEFAULT_FORCE_HTTPS))
+    cluster_token: Optional[str] = (
+        str(args.cluster_token) if args.cluster_token is not None
+        else (str(config_values["cluster_token"]) if "cluster_token" in config_values else DEFAULT_CLUSTER_TOKEN)
+    )
+    query_rate_limit: float = float(
+        args.query_rate_limit if args.query_rate_limit is not None
+        else config_values.get("query_rate_limit", DEFAULT_QUERY_RATE_LIMIT)
+    )
+    query_rate_burst: int = int(
+        args.query_rate_burst if args.query_rate_burst is not None
+        else config_values.get("query_rate_burst", DEFAULT_QUERY_RATE_BURST)
+    )
 
     setup_logging(debug=debug)
     
@@ -835,7 +1159,10 @@ def main():
         local_http_port=port,
         cache_lookup_callback=cache.lookup_filename,
         peer_discovery_timeout=peer_discovery_timeout,
-        max_parallel_peers=max_parallel_peers
+        max_parallel_peers=max_parallel_peers,
+        cluster_token=cluster_token,
+        query_rate_limit=query_rate_limit,
+        query_rate_burst=query_rate_burst,
     )
     libp2p_node.start()
 
@@ -843,6 +1170,7 @@ def main():
     P2PProxyHandler.cache = cache
     P2PProxyHandler.libp2p_node = libp2p_node
     P2PProxyHandler.force_https = force_https
+    P2PProxyHandler.cluster_token = cluster_token
     
     # Create HTTP server — prefer systemd-passed socket for socket activation
     try:

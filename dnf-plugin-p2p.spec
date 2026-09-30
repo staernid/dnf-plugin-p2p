@@ -2,7 +2,7 @@
 %{!?dnf_lowest_compatible: %global dnf_lowest_compatible 4.4.3}
 
 Name:           dnf-plugin-p2p
-Version:        0.3.4
+Version:        0.3.5
 Release:        1%{?dist}
 Summary:        Peer-to-peer package sharing plugin for libdnf5
 License:        GPL-2.0-or-later
@@ -113,6 +113,9 @@ pushd %{buildroot}%{_libexecdir}/%{name}
 patch -p1 --no-backup-if-mismatch < %{SOURCE10}
 popd
 
+# Remove demo and entrypoint executables installed by bundled packages into bin/
+rm -rf %{buildroot}%{_libexecdir}/%{name}/bin
+
 mkdir -p %{buildroot}%{_localstatedir}/cache/dnf-plugin-p2p
 
 %files
@@ -131,6 +134,7 @@ mkdir -p %{buildroot}%{_localstatedir}/cache/dnf-plugin-p2p
 %{_libexecdir}/%{name}/
 %{_unitdir}/dnf-p2p-proxy.service
 %{_sysusersdir}/dnf-p2p.conf
+%{_datadir}/selinux/packages/%{name}/
 %dir %attr(0755, dnf-p2p, dnf-p2p) %{_localstatedir}/cache/dnf-plugin-p2p
 
 %pre proxy
@@ -153,6 +157,9 @@ fi
 %systemd_postun_with_restart dnf-p2p-proxy.service
 
 %changelog
+* Wed Sep 30 2026 dnf-plugin-p2p contributors <none@example.com> - 0.3.5-1
+- Release 0.3.5
+
 * Sat Jul 04 2026 dnf-plugin-p2p contributors <none@example.com> - 0.3.4-1
 - Release 0.3.4
 

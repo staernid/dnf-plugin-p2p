@@ -12,9 +12,14 @@ srpm:
 	# Copy files to the build directory, excluding Git and build directories
 	tar --exclude='.git' --exclude='.copr' --exclude='build' --exclude='test_outdir' --exclude='test_install_dir' --exclude='test_wheels' -cf - . | tar -x -C build/$(NAME)-$(VERSION)
 	
+	# Copy local patches into SOURCES
+	if [ -d patches ]; then \
+		cp patches/*.patch build/SOURCES/ 2>/dev/null || true; \
+	fi
+	
 	# Download the external Source URLs listed in the spec file into build/SOURCES
 	# so that rpmbuild can find them and package them into the SRPM
-	for url in $$(grep -E '^Source[1-9][0-9]*:' build/SPECS/$(notdir $(spec)) | awk '{print $$2}'); do \
+	for url in $$(grep -E '^Source[1-9][0-9]*:' build/SPECS/$(notdir $(spec)) | awk '{print $$2}' | grep '^https\?://'); do \
 		curl -s -L -o build/SOURCES/$$(basename "$$url") "$$url"; \
 	done
 	

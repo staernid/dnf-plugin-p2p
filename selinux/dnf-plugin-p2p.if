@@ -1,0 +1,68 @@
+## <summary>dnf-plugin-p2p: Peer-to-peer package sharing daemon</summary>
+
+########################################
+## <summary>
+##	Execute dnf-plugin-p2p in the caller domain.
+## </summary>
+## <param name="domain">
+##	<summary>
+##	Domain allowed access.
+##	</summary>
+## </param>
+#
+interface(`dnf_p2p_domtrans',`
+	gen_require(`
+		type dnf_p2p_t, dnf_p2p_exec_t;
+	')
+
+	corecmd_search_bin($1)
+	domtrans_pattern($1, dnf_p2p_exec_t, dnf_p2p_t)
+')
+
+########################################
+## <summary>
+##	Read and manage dnf-plugin-p2p cache files.
+## </summary>
+## <param name="domain">
+##	<summary>
+##	Domain allowed access.
+##	</summary>
+## </param>
+#
+interface(`dnf_p2p_manage_cache',`
+	gen_require(`
+		type dnf_p2p_cache_t;
+	')
+
+	files_search_var($1)
+	manage_dirs_pattern($1, dnf_p2p_cache_t, dnf_p2p_cache_t)
+	manage_files_pattern($1, dnf_p2p_cache_t, dnf_p2p_cache_t)
+')
+
+########################################
+## <summary>
+##	All of the rules required to administrate
+##	a dnf-plugin-p2p environment.
+## </summary>
+## <param name="domain">
+##	<summary>
+##	Domain allowed access.
+##	</summary>
+## </param>
+## <param name="role">
+##	<summary>
+##	Role allowed access.
+##	</summary>
+## </param>
+## <rolecap/>
+#
+interface(`dnf_p2p_admin',`
+	gen_require(`
+		type dnf_p2p_t, dnf_p2p_exec_t, dnf_p2p_cache_t;
+	')
+
+	allow $1 dnf_p2p_t:process { ptrace signal_perms };
+	ps_process_pattern($1, dnf_p2p_t)
+
+	dnf_p2p_manage_cache($1)
+')

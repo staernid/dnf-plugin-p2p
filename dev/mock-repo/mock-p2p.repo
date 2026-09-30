@@ -1,0 +1,5 @@
+[mock-p2p]
+name=Mock P2P Test Repository
+baseurl=http://mock-repo:8080/
+enabled=1
+gpgcheck=0

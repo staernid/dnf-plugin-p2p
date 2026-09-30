@@ -6,16 +6,51 @@ NAME = $(shell rpm -q --specfile $(SPECFILE) --qf '%{NAME}\n' | head -n 1)
 VERSION = $(shell rpm -q --specfile $(SPECFILE) --qf '%{VERSION}\n' | head -n 1)
 DIST_DIR = build/rpmbuild
 
-.PHONY: all test patch-libp2p tarball srpm rpm clean bump-version
+.PHONY: all test lint mypy check-version patch-libp2p tarball srpm rpm clean bump-version dev-build dev-up dev-down dev-test dev-shell dev-logs
 
-all: test
+all: test lint
+
+check-version:
+	python3 bump-version.py --check
+
+lint: mypy
+
+mypy:
+	@if command -v uv >/dev/null 2>&1; then \
+		uv run mypy p2p-proxy-server/p2p_cache.py p2p-proxy-server/p2p_server.py p2p-proxy-server/p2p_libp2p.py p2p-proxy-server/dnf-p2p-client plugins/p2p_plugin.py bump-version.py; \
+	elif [ -x .venv/bin/mypy ]; then \
+		.venv/bin/mypy p2p-proxy-server/p2p_cache.py p2p-proxy-server/p2p_server.py p2p-proxy-server/p2p_libp2p.py p2p-proxy-server/dnf-p2p-client plugins/p2p_plugin.py bump-version.py; \
+	else \
+		mypy p2p-proxy-server/p2p_cache.py p2p-proxy-server/p2p_server.py p2p-proxy-server/p2p_libp2p.py p2p-proxy-server/dnf-p2p-client plugins/p2p_plugin.py bump-version.py; \
+	fi
 
 test:
-	@if [ -d .venv ]; then \
+	@if command -v uv >/dev/null 2>&1; then \
+		uv run pytest tests/; \
+	elif [ -x .venv/bin/pytest ]; then \
 		.venv/bin/pytest tests/; \
 	else \
 		pytest tests/; \
 	fi
+
+dev-build:
+	docker compose -f dev/compose.yaml build
+
+dev-up:
+	docker compose -f dev/compose.yaml up -d
+
+dev-down:
+	docker compose -f dev/compose.yaml down -v
+
+dev-test:
+	dev/run-integration-tests.sh
+
+dev-shell:
+	@peer=$${PEER:-1}; \
+	docker exec -it dnf-p2p-peer$$peer bash
+
+dev-logs:
+	docker compose -f dev/compose.yaml logs -f
 
 patch-libp2p:
 	@echo "Applying patches to py-libp2p-src..."

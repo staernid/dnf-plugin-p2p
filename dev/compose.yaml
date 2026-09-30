@@ -1,0 +1,77 @@
+name: dnf-p2p-dev
+
+services:
+  mock-repo:
+    build:
+      context: ..
+      dockerfile: dev/Dockerfile
+    image: dnf-p2p-dev:latest
+    container_name: dnf-p2p-mock-repo
+    hostname: mock-repo
+    command: ["python3", "/workspace/dev/mock-repo/server.py"]
+    volumes:
+      - ..:/workspace:z
+    networks:
+      dnf-p2p-net:
+        ipv4_address: 10.42.0.2
+
+  peer1:
+    image: dnf-p2p-dev:latest
+    container_name: dnf-p2p-peer1
+    hostname: peer1
+    command: ["/workspace/dev/entrypoint.sh"]
+    depends_on:
+      - mock-repo
+    volumes:
+      - ..:/workspace:z
+      - ./mock-repo/mock-p2p.repo:/etc/yum.repos.d/mock-p2p.repo:ro,z
+      - peer1-cache:/var/cache/dnf-plugin-p2p
+    networks:
+      dnf-p2p-net:
+        ipv4_address: 10.42.0.10
+
+  peer2:
+    image: dnf-p2p-dev:latest
+    container_name: dnf-p2p-peer2
+    hostname: peer2
+    command: ["/workspace/dev/entrypoint.sh"]
+    depends_on:
+      - mock-repo
+      - peer1
+    volumes:
+      - ..:/workspace:z
+      - ./mock-repo/mock-p2p.repo:/etc/yum.repos.d/mock-p2p.repo:ro,z
+      - peer2-cache:/var/cache/dnf-plugin-p2p
+    networks:
+      dnf-p2p-net:
+        ipv4_address: 10.42.0.11
+
+  peer3:
+    image: dnf-p2p-dev:latest
+    container_name: dnf-p2p-peer3
+    hostname: peer3
+    command: ["/workspace/dev/entrypoint.sh"]
+    depends_on:
+      - mock-repo
+      - peer1
+      - peer2
+    volumes:
+      - ..:/workspace:z
+      - ./mock-repo/mock-p2p.repo:/etc/yum.repos.d/mock-p2p.repo:ro,z
+      - peer3-cache:/var/cache/dnf-plugin-p2p
+    networks:
+      dnf-p2p-net:
+        ipv4_address: 10.42.0.12
+
+networks:
+  dnf-p2p-net:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 10.42.0.0/24
+
+volumes:
+  peer1-cache:
+  peer2-cache:
+  peer3-cache:
+

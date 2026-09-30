@@ -1,0 +1,61 @@
+policy_module(dnf-plugin-p2p, 1.0.0)
+
+########################################
+#
+# Declarations
+#
+
+type dnf_p2p_t;
+type dnf_p2p_exec_t;
+init_daemon_domain(dnf_p2p_t, dnf_p2p_exec_t)
+
+# Cache files (/var/cache/dnf-plugin-p2p)
+type dnf_p2p_cache_t;
+files_type(dnf_p2p_cache_t)
+
+# Network ports (HTTP proxy on 8888, libp2p on 8000)
+type dnf_p2p_port_t;
+corenet_port(dnf_p2p_port_t)
+
+########################################
+#
+# Policy rules for dnf_p2p_t daemon
+#
+
+# Allow daemon to manage its cache directory and files
+manage_dirs_pattern(dnf_p2p_t, dnf_p2p_cache_t, dnf_p2p_cache_t)
+manage_files_pattern(dnf_p2p_t, dnf_p2p_cache_t, dnf_p2p_cache_t)
+files_var_filetrans(dnf_p2p_t, dnf_p2p_cache_t, { dir file })
+
+# Networking: TCP and UDP port binding
+allow dnf_p2p_t dnf_p2p_port_t:tcp_socket { name_bind name_connect };
+allow dnf_p2p_t dnf_p2p_port_t:udp_socket { name_bind };
+
+# Allow socket communication
+allow dnf_p2p_t self:tcp_socket create_stream_socket_perms;
+allow dnf_p2p_t self:udp_socket create_socket_perms;
+allow dnf_p2p_t self:netlink_route_socket create_netlink_socket_perms;
+
+# Core network interfaces
+corenet_tcp_bind_generic_node(dnf_p2p_t)
+corenet_udp_bind_generic_node(dnf_p2p_t)
+corenet_tcp_bind_all_unreserved_ports(dnf_p2p_t)
+corenet_udp_bind_all_unreserved_ports(dnf_p2p_t)
+corenet_tcp_connect_http_port(dnf_p2p_t)
+corenet_tcp_connect_all_unreserved_ports(dnf_p2p_t)
+
+# mDNS multicast discovery (UDP 5353)
+corenet_udp_bind_howl_port(dnf_p2p_t)
+
+# System logging & DNS resolution
+logging_send_syslog_msg(dnf_p2p_t)
+sysnet_dns_name_resolve(dnf_p2p_t)
+
+# Basic system & process access
+miscfiles_read_localization(dnf_p2p_t)
+kernel_read_system_state(dnf_p2p_t)
+kernel_read_network_state(dnf_p2p_t)
+
+# Python runtime requirements
+corecmd_exec_bin(dnf_p2p_t)
+corecmd_exec_shell(dnf_p2p_t)

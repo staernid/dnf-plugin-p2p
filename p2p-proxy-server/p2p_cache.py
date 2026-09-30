@@ -9,7 +9,7 @@ import logging
 import hashlib
 import threading
 from pathlib import Path
-from typing import Optional, Dict, List
+from typing import Optional, Dict, List, Any
 import os
 import json
 import time
@@ -33,7 +33,7 @@ class P2PCache:
         self.cache_dir.mkdir(parents=True, exist_ok=True)
         self.max_cache_size_mb = max_cache_size_mb
         self.max_disk_usage_percent = max_disk_usage_percent
-        self.index = {}  # {hash: cache_entry}
+        self.index: Dict[str, Dict[str, Any]] = {}  # {hash: cache_entry}
         self.lock = threading.RLock()
         self._load_cache_index()
 
@@ -89,7 +89,7 @@ class P2PCache:
         except Exception as e:
             logger.warning(f"Failed to save cache index: {e}")
 
-    def get_file_hash(self, file_path: Path, algorithm: str = "sha256") -> str:
+    def get_file_hash(self, file_path: Path, algorithm: str = "sha256") -> Optional[str]:
         """Calculate the hash of a file.
         
         Args:
@@ -126,12 +126,11 @@ class P2PCache:
                 return False
             
             # Skip disk hash recalculation if the caller already provided/verified the package hash
-            if package_hash is not None:
-                file_hash = package_hash
-            else:
+            file_hash: Optional[str] = package_hash
+            if file_hash is None:
                 file_hash = self.get_file_hash(file_path)
-                if file_hash is None:
-                    return False
+            if file_hash is None:
+                return False
             
             # Copy to cache
             cache_file = self.cache_dir / file_path.name
@@ -324,6 +323,10 @@ class P2PCache:
                 
                 # Evict this entry
                 filename = info.get("filename")
+                if not filename:
+                    del self.index[package_hash]
+                    evicted_count += 1
+                    continue
                 cache_file = self.cache_dir / filename
                 try:
                     if cache_file.exists():

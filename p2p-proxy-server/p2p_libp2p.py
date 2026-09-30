@@ -1,9 +1,11 @@
+import ipaddress
 import logging
 import secrets
 import threading
+import time
 import trio
 import multiaddr
-from typing import Dict, List, Optional, Callable
+from typing import Dict, List, Optional, Callable, Set, Any, Tuple
 
 # Fallback stub for miniupnpc, which is an optional dependency of py-libp2p
 # but is unconditionally imported by it at startup. Since UPnP is disabled
@@ -17,7 +19,7 @@ except ImportError:
             return lambda *args, **kwargs: DummyMiniUPnP()
         def __call__(self, *args, **kwargs):
             return self
-    sys.modules['miniupnpc'] = DummyMiniUPnP()
+    sys.modules['miniupnpc'] = DummyMiniUPnP()  # type: ignore[assignment]
 
 from libp2p import new_host
 from libp2p.crypto.secp256k1 import create_new_key_pair
@@ -76,25 +78,82 @@ def extract_ip(addrs) -> Optional[str]:
                 best_ip = ip
 
     return best_ip
+ 
+ 
+class PeerRateLimiter:
+    """Thread-safe token-bucket rate limiter per peer ID."""
+
+    def __init__(self, rate: float = 20.0, burst: int = 30, time_func: Optional[Callable[[], float]] = None):
+        self.rate = float(rate)
+        self.burst = float(burst)
+        self.time_func = time_func or time.monotonic
+        self._buckets: Dict[str, Tuple[float, float]] = {}  # peer_id -> (tokens, last_time)
+        self._lock = threading.Lock()
+
+    def allow(self, peer_id: str) -> bool:
+        """Check if request from peer_id is allowed under rate limits."""
+        with self._lock:
+            now = self.time_func()
+            if peer_id not in self._buckets:
+                tokens = self.burst
+                last_time = now
+            else:
+                tokens, last_time = self._buckets[peer_id]
+                elapsed = max(0.0, now - last_time)
+                tokens = min(self.burst, tokens + elapsed * self.rate)
+                last_time = now
+
+            if tokens >= 1.0:
+                self._buckets[peer_id] = (tokens - 1.0, last_time)
+                if len(self._buckets) > 5000:
+                    self._cleanup(now)
+                return True
+            else:
+                self._buckets[peer_id] = (tokens, last_time)
+                return False
+
+    def _cleanup(self, now: float):
+        """Prune inactive buckets older than 300 seconds."""
+        cutoff = now - 300.0
+        stale = [pid for pid, (_, t) in self._buckets.items() if t < cutoff]
+        for pid in stale:
+            del self._buckets[pid]
+
+    def reset(self, peer_id: Optional[str] = None):
+        """Reset rate limiter state for a specific peer or all peers."""
+        with self._lock:
+            if peer_id is not None:
+                self._buckets.pop(peer_id, None)
+            else:
+                self._buckets.clear()
+
 
 class P2PLibp2pNode:
     """A thread-safe wrapper around py-libp2p for local peer discovery and querying."""
 
     def __init__(self, libp2p_port: int, local_http_port: int, cache_lookup_callback: Callable[[str], Optional[Dict]],
-                 peer_discovery_timeout: float = 2.0, max_parallel_peers: int = 5):
+                 peer_discovery_timeout: float = 2.0, max_parallel_peers: int = 5,
+                 cluster_token: Optional[str] = None,
+                 query_rate_limit: float = 20.0, query_rate_burst: int = 30):
         self.libp2p_port = libp2p_port
         self.local_http_port = local_http_port
         self.cache_lookup_callback = cache_lookup_callback
         self.peer_discovery_timeout = max(0.1, peer_discovery_timeout)
         self.max_parallel_peers = max(1, max_parallel_peers)
+        self.cluster_token = cluster_token
+        self.query_rate_limit = max(0.1, float(query_rate_limit))
+        self.query_rate_burst = max(1, int(query_rate_burst))
+        self.rate_limiter = PeerRateLimiter(rate=self.query_rate_limit, burst=self.query_rate_burst)
         self.discovered_peers: Dict[str, PeerInfo] = {}
-        self.trio_token = None
-        self.host = None
-        self.rr = None
-        self.codec = None
+        self.trio_token: Optional[trio.lowlevel.TrioToken] = None
+        self.host: Any = None
+        self.rr: Any = None
+        self.codec: Any = None
         self._started_event = threading.Event()
-        self.tested_peers = set()
-        self.nursery = None
+        self.tested_peers: Set[str] = set()
+        self.nursery: Optional[trio.Nursery] = None
+        self._pending_peer_discoveries: List[PeerInfo] = []
+        self._pending_lock = threading.Lock()
 
     def remove_peer(self, peer_id_str: str):
         """Remove a peer from discovered and tested sets to allow re-testing if rediscovered."""
@@ -145,16 +204,19 @@ class P2PLibp2pNode:
 
         # Register the peer discovery event handler
         def on_peer_discovery(peerinfo: PeerInfo):
-            if self.trio_token and self.nursery:
-                try:
-                    trio.from_thread.run_sync(
-                        self.nursery.start_soon,
-                        self._on_peer_discovered_async,
-                        peerinfo,
-                        trio_token=self.trio_token
-                    )
-                except Exception as e:
-                    logger.error(f"Failed to schedule peer discovery event in Trio loop: {e}")
+            with self._pending_lock:
+                if self.trio_token and self.nursery:
+                    try:
+                        trio.from_thread.run_sync(
+                            self.nursery.start_soon,
+                            self._on_peer_discovered_async,
+                            peerinfo,
+                            trio_token=self.trio_token
+                        )
+                    except Exception as e:
+                        logger.error(f"Failed to schedule peer discovery event in Trio loop: {e}")
+                else:
+                    self._pending_peer_discoveries.append(peerinfo)
 
         peerDiscovery.register_peer_discovered_handler(on_peer_discovery)
 
@@ -162,48 +224,84 @@ class P2PLibp2pNode:
         self.rr = RequestResponse(self.host)
         self.codec = JSONCodec()
 
-        async def query_handler(request: dict, context) -> dict:
-            package_name = request.get("package", "")
-            peer_id = context.peer_id
-            peer_id_str = peer_id.to_string()
-            logger.info(f"Received query request for package: {package_name} from {peer_id_str}")
-
-            # Thread-safe/async-safe update: if we don't have this peer in discovered list, add it
-            if peer_id_str not in self.discovered_peers:
-                try:
-                    peerinfo = self.host.get_peerstore().peer_info(peer_id)
-                    if peerinfo and peerinfo.addrs:
-                        await self._on_peer_discovered_async(peerinfo)
-                except Exception as e:
-                    logger.debug(f"Failed to dynamically discover connecting peer {peer_id_str}: {e}")
-            
-            # Response must indicate if we have the package
-            response = {
-                "has_package": False,
-                "http_port": self.local_http_port
-            }
-            if package_name == "__p2p_diagnostic_ping__":
-                return response
-
-            if self.cache_lookup_callback:
-                p_info = self.cache_lookup_callback(package_name)
-                if p_info:
-                    response["has_package"] = True
-                    response["hash"] = p_info.get("hash", "")
-                    response["size"] = p_info.get("size", 0)
-                    logger.info(f"We HAVE the package {package_name}. Responding positively.")
-            return response
-
-        self.rr.set_handler(PROTOCOL_ID, handler=query_handler, codec=self.codec)
-
-        # Signal that the node is ready
-        self._started_event.set()
+        self.rr.set_handler(PROTOCOL_ID, handler=self.query_handler, codec=self.codec)
 
         async with self.host.run(listen_addrs=listen_addrs), trio.open_nursery() as nursery:
             self.nursery = nursery
+            # Drain any peer discoveries queued before nursery was ready
+            with self._pending_lock:
+                pending = list(self._pending_peer_discoveries)
+                self._pending_peer_discoveries.clear()
+            for p_info in pending:
+                nursery.start_soon(self._on_peer_discovered_async, p_info)
+
+            # Signal that the node is ready
+            self._started_event.set()
+
+            async def sync_peerstore_peers():
+                while True:
+                    await trio.sleep(2)
+                    try:
+                        peer_ids = self.host.get_peerstore().peer_ids()
+                        for pid in peer_ids:
+                            pid_str = pid.to_string()
+                            if pid_str != self.host.get_id().to_string() and pid_str not in self.discovered_peers:
+                                pinfo = self.host.get_peerstore().peer_info(pid)
+                                if pinfo and pinfo.addrs:
+                                    nursery.start_soon(self._on_peer_discovered_async, pinfo)
+                    except Exception as e:
+                        logger.debug(f"Peerstore sync check error: {e}")
+
+            nursery.start_soon(sync_peerstore_peers)
             nursery.start_soon(self.host.get_peerstore().start_cleanup_task, 60)
             logger.info(f"libp2p node running with PeerID: {self.host.get_id().to_string()}")
             await trio.sleep_forever()
+
+    async def query_handler(self, request: dict, context) -> dict:
+        """Handle incoming libp2p package queries with rate limiting and cluster auth."""
+        package_name = request.get("package", "")
+        peer_id = context.peer_id
+        peer_id_str = peer_id.to_string()
+        logger.info(f"Received query request for package: {package_name} from {peer_id_str}")
+
+        # Check query rate limit per peer ID
+        if not self.rate_limiter.allow(peer_id_str):
+            logger.warning(f"Rate limited query from {peer_id_str} for package {package_name}")
+            return {"has_package": False, "rate_limited": True}
+
+        # Check cluster token authentication if enabled
+        if self.cluster_token:
+            req_token = request.get("cluster_token")
+            if not isinstance(req_token, str) or not secrets.compare_digest(req_token, self.cluster_token):
+                logger.warning(f"Unauthorized query from {peer_id_str}: invalid or missing cluster token")
+                return {"has_package": False, "unauthorized": True}
+
+        # Thread-safe/async-safe update: if we don't have this peer in discovered list, add it
+        if peer_id_str not in self.discovered_peers:
+            try:
+                if self.host:
+                    peerinfo = self.host.get_peerstore().peer_info(peer_id)
+                    if peerinfo and peerinfo.addrs:
+                        await self._on_peer_discovered_async(peerinfo)
+            except Exception as e:
+                logger.debug(f"Failed to dynamically discover connecting peer {peer_id_str}: {e}")
+        
+        # Response must indicate if we have the package
+        response: Dict[str, Any] = {
+            "has_package": False,
+            "http_port": self.local_http_port
+        }
+        if package_name == "__p2p_diagnostic_ping__":
+            return response
+
+        if self.cache_lookup_callback is not None:
+            p_info = self.cache_lookup_callback(package_name)
+            if p_info:
+                response["has_package"] = True
+                response["hash"] = p_info.get("hash", "")
+                response["size"] = p_info.get("size", 0)
+                logger.info(f"We HAVE the package {package_name}. Responding positively.")
+        return response
 
     def query_peers_for_package(self, package_name: str) -> List[Dict]:
         """Query all discovered peers for a package. Thread-safe."""
@@ -226,13 +324,17 @@ class P2PLibp2pNode:
                         logger.info(f"Connecting to peer {peer_id_str}...")
                         await self.host.connect(peerinfo)
 
-                        logger.info(f"Sending query request to {peer_id_str}...")
+                        start_time = trio.current_time()
+                        req_payload: Dict[str, Any] = {"package": package_name}
+                        if self.cluster_token:
+                            req_payload["cluster_token"] = self.cluster_token
                         response = await self.rr.send_request(
                             peer_id=peerinfo.peer_id,
                             protocol_ids=[PROTOCOL_ID],
-                            request={"package": package_name},
+                            request=req_payload,
                             codec=self.codec
                         )
+                        rtt_ms = (trio.current_time() - start_time) * 1000.0
 
                         if response and response.get("has_package"):
                             ip = extract_ip(peerinfo.addrs)
@@ -241,9 +343,13 @@ class P2PLibp2pNode:
                                     "ip": ip,
                                     "port": response.get("http_port"),
                                     "hash": response.get("hash"),
-                                    "size": response.get("size")
+                                    "size": response.get("size"),
+                                    "rtt_ms": rtt_ms
                                 })
-                                logger.info(f"Peer {peer_id_str} at {ip}:{response.get('http_port')} has package {package_name}")
+                                logger.info(
+                                    f"Peer {peer_id_str} at {ip}:{response.get('http_port')} has package {package_name} "
+                                    f"(RTT: {rtt_ms:.1f}ms)"
+                                )
                     except Exception as e:
                         logger.warning(f"Failed to query peer {peer_id_str}: {e}")
                         # Remove unresponsive peer
@@ -253,6 +359,9 @@ class P2PLibp2pNode:
                 async with trio.open_nursery() as nursery:
                     for peer_id_str in peer_ids:
                         nursery.start_soon(query_peer, peer_id_str)
+
+            # Sort peers by lowest RTT (fastest peer first)
+            results.sort(key=lambda x: x.get("rtt_ms", float("inf")))
             return results
 
         try:
@@ -284,10 +393,13 @@ class P2PLibp2pNode:
             await self.host.connect(peerinfo)
 
             # 2. Get HTTP port
+            ping_payload: Dict[str, Any] = {"package": "__p2p_diagnostic_ping__"}
+            if self.cluster_token:
+                ping_payload["cluster_token"] = self.cluster_token
             response = await self.rr.send_request(
                 peer_id=peerinfo.peer_id,
                 protocol_ids=[PROTOCOL_ID],
-                request={"package": "__p2p_diagnostic_ping__"},
+                request=ping_payload,
                 codec=self.codec
             )
             if not response or "http_port" not in response:
@@ -306,9 +418,17 @@ class P2PLibp2pNode:
             except (ValueError, TypeError) as e:
                 raise RuntimeError(f"SSRF Protection: Peer reported invalid or privileged port {http_port}: {e}")
 
-            # SSRF Protection: Deny diagnostics loopback requests to local host services
-            if ip in ("127.0.0.1", "::1", "0.0.0.0", "::") or ip.startswith("127."):
-                raise RuntimeError(f"SSRF Protection: Rejecting diagnostic request to loopback address {ip}")
+            # SSRF Protection: Validate IP address
+            try:
+                parsed_ip = ipaddress.ip_address(ip)
+            except ValueError as e:
+                raise RuntimeError(f"SSRF Protection: Invalid IP address {ip}: {e}")
+
+            if parsed_ip.is_loopback or parsed_ip.is_link_local or parsed_ip.is_multicast or parsed_ip.is_unspecified or parsed_ip.is_reserved:
+                raise RuntimeError(f"SSRF Protection: Rejecting diagnostic request to non-routable address {ip}")
+
+            if ip == "169.254.169.254":
+                raise RuntimeError(f"SSRF Protection: Rejecting cloud metadata endpoint {ip}")
 
             if ":" in ip:
                 url = f"http://[{ip}]:{http_port}/packages/p2p-diagnostic.txt"
@@ -324,7 +444,10 @@ class P2PLibp2pNode:
                     
                     def fetch():
                         import requests
-                        r = requests.get(url, timeout=3, allow_redirects=False)
+                        kwargs: Dict[str, Any] = {"timeout": 3, "allow_redirects": False}
+                        if self.cluster_token:
+                            kwargs["headers"] = {"X-Cluster-Token": self.cluster_token}
+                        r = requests.get(url, **kwargs)
                         r.raise_for_status()
                         return r.content
 

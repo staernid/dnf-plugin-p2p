@@ -1,7 +1,7 @@
 import threading
 from unittest.mock import MagicMock
 import pytest
-from p2p_libp2p import P2PLibp2pNode, extract_ip
+from p2p_libp2p import P2PLibp2pNode, PeerRateLimiter, extract_ip
 
 def test_extract_ip():
     addrs = [
@@ -235,4 +235,152 @@ def test_diagnostic_check_retry_and_failure():
             assert "peer1" not in node.tested_peers
 
     trio.run(run_test_failure)
+
+
+def test_peer_rate_limiter_tokens_and_burst():
+    limiter = PeerRateLimiter(rate=10.0, burst=5)
+    # Burst allows 5 requests
+    for i in range(5):
+        assert limiter.allow("peer1") is True, f"Request {i+1} should be allowed"
+    # 6th immediate request should be denied
+    assert limiter.allow("peer1") is False
+
+    # A different peer has its own bucket
+    assert limiter.allow("peer2") is True
+
+
+def test_peer_rate_limiter_recovery():
+    current_time = 100.0
+
+    def clock():
+        return current_time
+
+    limiter = PeerRateLimiter(rate=2.0, burst=2, time_func=clock)
+    assert limiter.allow("peerA") is True
+    assert limiter.allow("peerA") is True
+    assert limiter.allow("peerA") is False
+
+    # Advance time by 0.5s: 2.0 * 0.5 = 1 token added
+    current_time += 0.5
+    assert limiter.allow("peerA") is True
+    assert limiter.allow("peerA") is False
+
+    # Advance time by 2.0s: max burst (2) tokens added
+    current_time += 2.0
+    assert limiter.allow("peerA") is True
+    assert limiter.allow("peerA") is True
+    assert limiter.allow("peerA") is False
+
+    # Test reset
+    limiter.reset("peerA")
+    assert limiter.allow("peerA") is True
+
+
+def test_query_handler_rate_limiting():
+    import trio
+
+    node = P2PLibp2pNode(
+        libp2p_port=0,
+        local_http_port=8888,
+        cache_lookup_callback=lambda pkg: {"hash": "h", "size": 10},
+        query_rate_limit=1.0,
+        query_rate_burst=2
+    )
+    context = MagicMock()
+    context.peer_id.to_string.return_value = "peer_flood"
+
+    async def run_test():
+        res1 = await node.query_handler({"package": "pkg.rpm"}, context)
+        assert res1.get("has_package") is True
+        assert res1.get("rate_limited") is None
+
+        res2 = await node.query_handler({"package": "pkg.rpm"}, context)
+        assert res2.get("has_package") is True
+        assert res2.get("rate_limited") is None
+
+        # Exceeding burst limit triggers rate limiting
+        res3 = await node.query_handler({"package": "pkg.rpm"}, context)
+        assert res3.get("has_package") is False
+        assert res3.get("rate_limited") is True
+
+    trio.run(run_test)
+
+
+def test_query_handler_cluster_token():
+    import trio
+
+    token = "secret-cluster-psk-12345"
+    node = P2PLibp2pNode(
+        libp2p_port=0,
+        local_http_port=8888,
+        cache_lookup_callback=lambda pkg: {"hash": "abc", "size": 50},
+        cluster_token=token
+    )
+    context = MagicMock()
+    context.peer_id.to_string.return_value = "peer_client"
+
+    async def run_test():
+        # Missing token
+        res_no_token = await node.query_handler({"package": "pkg.rpm"}, context)
+        assert res_no_token == {"has_package": False, "unauthorized": True}
+
+        # Invalid token
+        res_bad_token = await node.query_handler({"package": "pkg.rpm", "cluster_token": "wrong"}, context)
+        assert res_bad_token == {"has_package": False, "unauthorized": True}
+
+        # Valid token
+        res_ok = await node.query_handler({"package": "pkg.rpm", "cluster_token": token}, context)
+        assert res_ok.get("has_package") is True
+        assert res_ok.get("hash") == "abc"
+        assert res_ok.get("unauthorized") is None
+
+    trio.run(run_test)
+
+
+def test_query_peers_and_diagnostic_sends_cluster_token():
+    import trio
+    from unittest.mock import AsyncMock, patch
+
+    token = "test-cluster-token"
+    node = P2PLibp2pNode(
+        libp2p_port=0,
+        local_http_port=8888,
+        cache_lookup_callback=None,
+        cluster_token=token
+    )
+    node.host = MagicMock()
+    node.host.connect = AsyncMock()
+    node.rr = MagicMock()
+    node.rr.send_request = AsyncMock(return_value={"http_port": 8889, "has_package": True})
+    node.codec = MagicMock()
+
+    peerinfo = MagicMock()
+    peerinfo.peer_id.to_string.return_value = "peer1"
+    peerinfo.addrs = ["/ip4/192.168.1.100/tcp/8000"]
+    node.discovered_peers["peer1"] = peerinfo
+
+    mock_response = MagicMock()
+    mock_response.status_code = 200
+    mock_response.content = b"OK"
+
+    async def run_test():
+        with patch("requests.get", return_value=mock_response) as mock_get:
+            await node._run_diagnostic_check_async(peerinfo)
+            # Check libp2p ping request had cluster_token
+            node.rr.send_request.assert_called_with(
+                peer_id=peerinfo.peer_id,
+                protocol_ids=[node.rr.send_request.call_args[1]["protocol_ids"][0]],
+                request={"package": "__p2p_diagnostic_ping__", "cluster_token": token},
+                codec=node.codec
+            )
+            # Check HTTP GET had X-Cluster-Token header
+            mock_get.assert_called_once_with(
+                "http://192.168.1.100:8889/packages/p2p-diagnostic.txt",
+                timeout=3,
+                allow_redirects=False,
+                headers={"X-Cluster-Token": token}
+            )
+
+    trio.run(run_test)
+
 
