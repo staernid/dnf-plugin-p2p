@@ -2,7 +2,7 @@
 %{!?dnf_lowest_compatible: %global dnf_lowest_compatible 4.4.3}
 
 Name:           dnf-plugin-p2p
-Version:        0.3.5
+Version:        0.3.6
 Release:        1%{?dist}
 Summary:        Peer-to-peer package sharing plugin for libdnf5
 License:        GPL-2.0-or-later
@@ -10,13 +10,15 @@ URL:            https://github.com/staernid/libdnf-p2p-sharing
 Source0:        %{url}/archive/v%{version}/%{name}-%{version}.tar.gz
 Source1:        https://files.pythonhosted.org/packages/fc/21/d5585856169c595d99a596dd8000afae40053f9f5c955d8ec8fb2ec3247c/fastecdsa-2.3.2.tar.gz
 Source2:        https://files.pythonhosted.org/packages/bc/52/5ed393ab49df7e3b03995d3c4e53bae1e8c2ca40909cf25a41b346c09a38/py_multibase-2.0.0.tar.gz
-Source3:        https://files.pythonhosted.org/packages/11/3d/ed68b0eccd0654f7f3c163d9b3d428f903e5e3e884ab1f0d0a16ba6a4f11/py_multihash-3.0.0.tar.gz
+Source3:        https://files.pythonhosted.org/packages/da/d8/16bf2e958a80a85b2c905c03e412c20ba7ed5911946e2b7050f3b8fa612b/py-multihash-2.0.1.tar.gz
 Source4:        https://files.pythonhosted.org/packages/5e/26/ef24db0fbfec080b72c5ac4a1000da3a4d696a1e31862c695d683097a1b5/py_multicodec-1.0.0.tar.gz
 Source5:        https://files.pythonhosted.org/packages/96/8e/68c2bd0346247570e8e01e8c170a0237884e95cdfa43989527b71adaa978/py_cid-0.5.0.tar.gz
 Source6:        https://files.pythonhosted.org/packages/b5/74/a87aafa40ec3a37089148b859892cbe2eef08d132c816d58a60459be5337/trio-typing-0.10.0.tar.gz
 Source7:        https://files.pythonhosted.org/packages/39/5b/99ee4dd6080d857f029ad209860d461305f5fba9fef2316548a1d131e4c2/rpcudp-5.0.1.tar.gz
 Source8:        https://github.com/libp2p/py-libp2p/archive/e11ec4c173028af04637dc499de6521b6704253f/libp2p-0.6.0.tar.gz
 Source9:        https://files.pythonhosted.org/packages/source/p/pycryptodome/pycryptodome-3.20.0.tar.gz
+Source11:       https://files.pythonhosted.org/packages/0a/21/a1b12adc1c63541f9216a753d85c0da4536597ef3d48ccdb6cecde56cebf/multiaddr-0.0.11.tar.gz
+Source12:       https://files.pythonhosted.org/packages/ce/b6/6fa6b3b598a03cba5e80f829e0dadbb49d7645f523d209b2fb7ea0bbb02a/async_generator-1.10.tar.gz
 
 # Patches for bundled py-libp2p (applied during %install, not %prep)
 # See patches/0001-fix-peerstore-crash-on-expired-peer-gc.patch for details
@@ -58,7 +60,7 @@ and the P2P proxy server.
 %package proxy
 Summary:        P2P proxy server daemon for dnf-plugin-p2p
 Requires:       python3-trio
-Requires:       python3-multiaddr
+Requires:       python3-dns
 Requires:       python3-aioquic
 Requires:       python3-anyio
 Requires:       python3-base58
@@ -72,16 +74,25 @@ Requires:       python3-zeroconf
 Requires:       python3-trio-websocket
 Requires:       python3-morphys
 Requires:       python3-lru-dict
+Requires:       python3-varint
+Requires:       python3-netaddr
+Requires:       python3-typing-extensions
+Requires:       python3-baseconv
+Requires:       python3-httpx
+Requires:       python3-psutil
+Requires:       python3-miniupnpc
 %{?sysusers_requires_compat}
 Provides:       bundled(python3dist(fastecdsa)) = 2.3.2
 Provides:       bundled(python3dist(py-multibase)) = 2.0.0
-Provides:       bundled(python3dist(py-multihash)) = 3.0.0
+Provides:       bundled(python3dist(py-multihash)) = 2.0.1
 Provides:       bundled(python3dist(py-multicodec)) = 1.0.0
 Provides:       bundled(python3dist(py-cid)) = 0.5.0
 Provides:       bundled(python3dist(trio-typing)) = 0.10.0
 Provides:       bundled(python3dist(rpcudp)) = 5.0.1
 Provides:       bundled(python3dist(libp2p)) = 0.6.0
 Provides:       bundled(python3dist(pycryptodome)) = 3.20.0
+Provides:       bundled(python3dist(multiaddr)) = 0.0.11
+Provides:       bundled(python3dist(async_generator)) = 1.10
 Provides:       libdnf-p2p-sharing-proxy = %{version}-%{release}
 Obsoletes:      libdnf-p2p-sharing-proxy < %{version}-%{release}
 
@@ -106,7 +117,7 @@ python3 -m pip install \
     --target=%{buildroot}%{_libexecdir}/%{name} \
     --no-build-isolation \
     --no-deps \
-    fastecdsa py-multibase py-multihash py-multicodec py-cid trio-typing rpcudp libp2p pycryptodome
+    fastecdsa py-multibase py-multihash py-multicodec py-cid trio-typing rpcudp libp2p pycryptodome multiaddr async_generator
 
 # Apply patches to bundled py-libp2p after pip install
 pushd %{buildroot}%{_libexecdir}/%{name}
@@ -157,6 +168,9 @@ fi
 %systemd_postun_with_restart dnf-p2p-proxy.service
 
 %changelog
+* Thu Oct 01 2026 dnf-plugin-p2p contributors <none@example.com> - 0.3.6-1
+- Release 0.3.6
+
 * Wed Sep 30 2026 dnf-plugin-p2p contributors <none@example.com> - 0.3.5-1
 - Release 0.3.5
 

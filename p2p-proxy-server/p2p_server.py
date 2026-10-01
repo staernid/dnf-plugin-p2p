@@ -26,8 +26,8 @@ from typing import Optional, Dict, List, Any, Tuple, Union, cast
 from configparser import ConfigParser
 
 
-# Set up local paths relative to this script
-sys.path.append(str(Path(__file__).parent))
+# Set up local paths relative to this script (bundled dependencies take precedence)
+sys.path.insert(0, str(Path(__file__).parent))
 
 from p2p_cache import P2PCache
 from p2p_libp2p import P2PLibp2pNode
