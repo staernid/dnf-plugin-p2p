@@ -230,3 +230,40 @@ def test_concurrent_cache_access(temp_cache_dir):
 
     assert not errors, f"Errors during concurrent cache access: {errors}"
 
+
+def test_legacy_cache_migration(temp_cache_dir):
+    # Set up nested legacy directory structure: temp_cache_dir / .cache / dnf-plugin-p2p
+    nested_dir = temp_cache_dir / ".cache" / "dnf-plugin-p2p"
+    nested_dir.mkdir(parents=True, exist_ok=True)
+
+    pkg_file = nested_dir / "legacy-pkg-1.0.fc45.x86_64.rpm"
+    pkg_file.write_bytes(b"legacy-package-contents")
+    import hashlib, json
+    pkg_hash = hashlib.sha256(b"legacy-package-contents").hexdigest()
+
+    nested_index = {
+        pkg_hash: {
+            "filename": "legacy-pkg-1.0.fc45.x86_64.rpm",
+            "size": len(b"legacy-package-contents"),
+            "last_accessed": 1000.0
+        }
+    }
+    with open(nested_dir / ".p2p_index", 'w') as f:
+        json.dump(nested_index, f)
+
+    # Initialize cache on temp_cache_dir - should trigger migration
+    cache = P2PCache(temp_cache_dir)
+
+    # File should now exist at root of cache_dir
+    migrated_file = temp_cache_dir / "legacy-pkg-1.0.fc45.x86_64.rpm"
+    assert migrated_file.exists()
+    assert not (nested_dir / "legacy-pkg-1.0.fc45.x86_64.rpm").exists()
+
+    # Index should include the migrated package
+    lookup = cache.lookup_filename("legacy-pkg-1.0.fc45.x86_64.rpm")
+    assert lookup is not None
+    assert lookup["hash"] == pkg_hash
+
+    # Nested directory should have been cleaned up
+    assert not (temp_cache_dir / ".cache").exists()
+

@@ -35,7 +35,69 @@ class P2PCache:
         self.max_disk_usage_percent = max_disk_usage_percent
         self.index: Dict[str, Dict[str, Any]] = {}  # {hash: cache_entry}
         self.lock = threading.RLock()
+        self._migrate_legacy_cache()
         self._load_cache_index()
+
+    def _migrate_legacy_cache(self) -> None:
+        """Migrate any packages and index from nested or legacy cache directories."""
+        nested_dir = self.cache_dir / ".cache" / "dnf-plugin-p2p"
+        if not nested_dir.exists() or not nested_dir.is_dir():
+            return
+
+        logger.info(f"Migrating legacy cache from {nested_dir} to {self.cache_dir}")
+        legacy_index = {}
+        nested_index_file = nested_dir / ".p2p_index"
+        if nested_index_file.exists():
+            try:
+                with open(nested_index_file, 'r') as f:
+                    legacy_index = json.load(f)
+            except Exception as e:
+                logger.warning(f"Failed to read legacy index {nested_index_file}: {e}")
+
+        # Move RPM files
+        for item in nested_dir.iterdir():
+            if item.is_file() and item.name.endswith((".rpm", ".drpm")):
+                dest = self.cache_dir / item.name
+                if not dest.exists():
+                    try:
+                        shutil.move(str(item), str(dest))
+                    except Exception as e:
+                        logger.warning(f"Failed to move {item} to {dest}: {e}")
+                else:
+                    try:
+                        item.unlink()
+                    except Exception:
+                        pass
+
+        # Merge legacy index into main index file if present
+        if legacy_index:
+            main_index_file = self.cache_dir / ".p2p_index"
+            main_index = {}
+            if main_index_file.exists():
+                try:
+                    with open(main_index_file, 'r') as f:
+                        main_index = json.load(f)
+                except Exception:
+                    pass
+            for k, v in legacy_index.items():
+                if k not in main_index:
+                    main_index[k] = v
+            try:
+                with open(main_index_file, 'w') as f:
+                    json.dump(main_index, f, indent=2)
+            except Exception as e:
+                logger.warning(f"Failed to write merged index {main_index_file}: {e}")
+
+        # Clean up legacy directory
+        try:
+            if nested_index_file.exists():
+                nested_index_file.unlink()
+            nested_dir.rmdir()
+            parent_dot_cache = self.cache_dir / ".cache"
+            if parent_dot_cache.exists() and not any(parent_dot_cache.iterdir()):
+                parent_dot_cache.rmdir()
+        except Exception as e:
+            logger.debug(f"Could not remove empty legacy cache directory: {e}")
 
     def _load_cache_index(self) -> None:
         """Load the cache index from disk."""

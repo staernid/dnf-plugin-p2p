@@ -48,6 +48,7 @@ class P2PProxyHandler(BaseHTTPRequestHandler):
     force_https: bool = True
     cluster_token: Optional[str] = None
     swarm_threshold: int = 50 * 1024 * 1024  # 50 MB default for swarm chunking
+    streaming_threshold: int = 4 * 1024 * 1024  # 4 MB threshold to switch P2P transfers to streaming
 
     # Map of filename -> expected_hash registered by local DNF instances
     expected_hashes: Dict[str, str] = {}
@@ -324,7 +325,7 @@ class P2PProxyHandler(BaseHTTPRequestHandler):
 
             # Retrieve expected hash if registered by local DNF
             with P2PProxyHandler.expected_hashes_lock:
-                expected_hash = P2PProxyHandler.expected_hashes.get(filename)
+                expected_hash = P2PProxyHandler.expected_hashes.get(filename) if is_local else None
 
             if not self.cache:
                 self.send_error(500, "Cache not initialized")
@@ -335,8 +336,17 @@ class P2PProxyHandler(BaseHTTPRequestHandler):
             if cache_file:
                 # If we have a registered expected hash, verify the cache integrity
                 if expected_hash:
-                    cached_hash = self.cache.get_file_hash(cache_file)
-                    if cached_hash != expected_hash:
+                    # In-memory index hash check avoids re-reading gigabytes from disk
+                    cached_hash = None
+                    if hasattr(self.cache, "index") and isinstance(self.cache.index, dict):
+                        for p_hash, info in self.cache.index.items():
+                            if info.get("filename") == filename:
+                                cached_hash = p_hash
+                                break
+                    if not cached_hash and hasattr(self.cache, "get_file_hash"):
+                        cached_hash = self.cache.get_file_hash(cache_file)
+
+                    if cached_hash and cached_hash != expected_hash:
                         logger.warning(f"Cache corruption detected for {filename}. Expected {expected_hash}, got {cached_hash}. Evicting.")
                         try:
                             cache_file.unlink()
@@ -418,7 +428,7 @@ class P2PProxyHandler(BaseHTTPRequestHandler):
                     logger.info(f"Attempting to download {filename} from peer {peer_ip}:{peer_port}")
                     # Enforce the trusted expected_hash if available; otherwise use peer's self-reported hash
                     peer_target_hash = expected_hash or peer_hash
-                    if self._download_from_peer(peer_url, filename, expected_hash=peer_target_hash):
+                    if self._download_from_peer(peer_url, filename, expected_hash=peer_target_hash, remote_url=remote_url):
                         return
                 logger.warning(f"Failed to fetch {filename} from any peers. Falling back to remote mirror.")
  
@@ -771,11 +781,18 @@ class P2PProxyHandler(BaseHTTPRequestHandler):
                 temp_file.unlink()
             return True  # Payload was already sent to client
 
-    def _download_from_peer(self, peer_url: str, filename: str, expected_hash: Optional[str] = None) -> bool:
+    def _download_from_peer(self, peer_url: str, filename: str, expected_hash: Optional[str] = None, remote_url: Optional[str] = None) -> bool:
         """Download package from peer via HTTP with peer verification and authentication."""
-        return self._download_and_serve(peer_url, filename, expected_hash=expected_hash, is_p2p=True)
+        return self._download_and_serve(peer_url, filename, expected_hash=expected_hash, is_p2p=True, remote_url=remote_url)
 
-    def _download_and_serve(self, url: str, filename: str, expected_hash: Optional[str] = None, is_p2p: bool = False) -> bool:
+    def _download_and_serve(
+        self,
+        url: str,
+        filename: str,
+        expected_hash: Optional[str] = None,
+        is_p2p: bool = False,
+        remote_url: Optional[str] = None
+    ) -> bool:
         """Download file from URL, stream it to client, and save to cache."""
         if not self.cache:
             return False
@@ -793,8 +810,15 @@ class P2PProxyHandler(BaseHTTPRequestHandler):
                 logger.warning(f"Download source {url} returned status {response.status_code}")
                 return False
 
-            if is_p2p:
-                # Buffer and verify peer transport integrity BEFORE sending headers to client
+            content_len_hdr = response.headers.get("Content-Length")
+            file_size = int(content_len_hdr) if content_len_hdr and content_len_hdr.isdigit() else 0
+
+            # For P2P transfers: buffer small packages (<4MB) when remote fallback mirror is available
+            # so that any corrupt peer files can transparently fall back to remote mirrors;
+            # stream larger packages directly to client to avoid DNF progress bar freezing.
+            should_buffer = is_p2p and bool(remote_url) and (file_size > 0 and file_size <= self.streaming_threshold)
+
+            if should_buffer:
                 hasher = hashlib.sha256()
                 content_chunks: List[bytes] = []
                 for chunk in response.iter_content(chunk_size=65536):
@@ -837,11 +861,13 @@ class P2PProxyHandler(BaseHTTPRequestHandler):
                     self.send_header("Content-Type", "application/x-redhat-package-manager")
                     if "Content-Length" in response.headers:
                         self.send_header("Content-Length", response.headers["Content-Length"])
+                    self.send_header("Accept-Ranges", "bytes")
                     self.end_headers()
                 except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError) as e:
                     raise ClientDisconnected() from e
 
                 hasher = hashlib.sha256()
+                total_bytes = 0
                 with open(temp_file, 'wb') as tmp_f:
                     for chunk in response.iter_content(chunk_size=65536):
                         if chunk:
@@ -851,6 +877,7 @@ class P2PProxyHandler(BaseHTTPRequestHandler):
                                 raise ClientDisconnected() from e
                             tmp_f.write(chunk)
                             hasher.update(chunk)
+                            total_bytes += len(chunk)
 
                 downloaded_hash = hasher.hexdigest()
                 if expected_hash and downloaded_hash != expected_hash:
@@ -858,6 +885,8 @@ class P2PProxyHandler(BaseHTTPRequestHandler):
                     raise ClientDisconnected("Hash mismatch detected")
 
                 success = True
+                if is_p2p:
+                    self.record_p2p_saved(total_bytes)
                 return True
         except ClientDisconnected:
             raise
@@ -935,7 +964,7 @@ def main():
     DEFAULT_HOST = "0.0.0.0"
     DEFAULT_PORT = 8888
     DEFAULT_LIBP2P_PORT = 8000
-    DEFAULT_CACHE_DIR = "/var/cache/dnf-plugin-p2p" if is_root else str(Path.home() / ".cache" / "dnf-plugin-p2p")
+    DEFAULT_CACHE_DIR = "/var/cache/dnf-plugin-p2p" if (is_root or os.access("/var/cache/dnf-plugin-p2p", os.W_OK)) else str(Path.home() / ".cache" / "dnf-plugin-p2p")
     DEFAULT_PEER_DISCOVERY_TIMEOUT = 2.0
     DEFAULT_MAX_PARALLEL_PEERS = 5
     DEFAULT_DEBUG = False
@@ -1056,11 +1085,6 @@ def main():
                     if config.has_option("p2p", "bind_host"):
                         try:
                             config_values["host"] = config.get("p2p", "bind_host")
-                        except Exception:
-                            pass
-                    if "host" not in config_values and config.has_option("p2p", "proxy_host"):
-                        try:
-                            config_values["host"] = config.get("p2p", "proxy_host")
                         except Exception:
                             pass
                     if config.has_option("p2p", "proxy_port"):

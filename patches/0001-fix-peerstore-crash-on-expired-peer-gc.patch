@@ -1,26 +1,112 @@
-From: dnf-plugin-p2p contributors <none@example.com>
-Subject: [PATCH] Fix PeerStoreError crash in maybe_delete_peer_record
-
-When the peerstore's garbage collection runs via maybe_delete_peer_record(),
-calling self.addrs(peer_id) can raise PeerStoreError if the peer's data
-has already expired or been removed from peer_data_map. The unhandled
-exception crashes the entire libp2p event loop and kills the proxy daemon.
-
-This patch wraps the addrs() call in a try/except for PeerStoreError.
-If the error is raised, the peer record is removed since the peer has
-no valid addresses anyway.
-
-Upstream bug: https://github.com/libp2p/py-libp2p/issues/XXXX
-
----
- libp2p/peer/peerstore.py | 8 ++++++--
- 1 file changed, 6 insertions(+), 2 deletions(-)
-
+diff --git a/libp2p/discovery/mdns/listener.py b/libp2p/discovery/mdns/listener.py
+index fbe16ec7..cb9026c1 100644
+--- a/libp2p/discovery/mdns/listener.py
++++ b/libp2p/discovery/mdns/listener.py
+@@ -25,11 +25,13 @@ class PeerListener(ServiceListener):
+         zeroconf: Zeroconf,
+         service_type: str,
+         service_name: str,
++        peer_id: str | None = None,
+     ) -> None:
+         self.peerstore = peerstore
+         self.zeroconf = zeroconf
+         self.service_type = service_type
+         self.service_name = service_name
++        self.peer_id = peer_id
+         self.discovered_services: dict[str, ID] = {}
+         self.browser = ServiceBrowser(self.zeroconf, self.service_type, listener=self)
+ 
+@@ -42,6 +44,10 @@ class PeerListener(ServiceListener):
+             return
+         peer_info = self._extract_peer_info(info)
+         if peer_info:
++            if self.peer_id and str(peer_info.peer_id) == str(self.peer_id):
++                return
++            if peer_info.peer_id in self.peerstore.peer_with_keys():
++                return
+             self.discovered_services[name] = peer_info.peer_id
+             self.peerstore.add_addrs(peer_info.peer_id, peer_info.addrs, 10)
+             peerDiscovery.emit_peer_discovered(peer_info)
+@@ -51,16 +57,23 @@ class PeerListener(ServiceListener):
+         if name == self.service_name:
+             return
+         logger.debug(f"Removing service: {name}")
+-        peer_id = self.discovered_services.pop(name)
+-        self.peerstore.clear_addrs(peer_id)
+-        logger.debug(f"Removed Peer: {peer_id}")
++        peer_id = self.discovered_services.pop(name, None)
++        if peer_id:
++            self.peerstore.clear_addrs(peer_id)
++            logger.debug(f"Removed Peer: {peer_id}")
+ 
+     def update_service(self, zc: Zeroconf, type_: str, name: str) -> None:
++        if name == self.service_name:
++            return
+         info = zc.get_service_info(type_, name, timeout=5000)
+         if not info:
+             return
+         peer_info = self._extract_peer_info(info)
+         if peer_info:
++            if self.peer_id and str(peer_info.peer_id) == str(self.peer_id):
++                return
++            if peer_info.peer_id in self.peerstore.peer_with_keys():
++                return
+             self.peerstore.clear_addrs(peer_info.peer_id)
+             self.peerstore.add_addrs(peer_info.peer_id, peer_info.addrs, 10)
+             logger.debug(f"Updated Peer {peer_info.peer_id}")
+diff --git a/libp2p/discovery/mdns/mdns.py b/libp2p/discovery/mdns/mdns.py
+index da765727..51de2364 100644
+--- a/libp2p/discovery/mdns/mdns.py
++++ b/libp2p/discovery/mdns/mdns.py
+@@ -56,6 +56,7 @@ class MDNSDiscovery:
+             peerstore=self.peerstore,
+             service_type=SERVICE_TYPE,
+             service_name=self.serviceName,
++            peer_id=self.peer_id,
+         )
+ 
+     def start(self) -> None:
+diff --git a/libp2p/network/connection/swarm_connection.py b/libp2p/network/connection/swarm_connection.py
+index 1bc1b154..5c797587 100644
+--- a/libp2p/network/connection/swarm_connection.py
++++ b/libp2p/network/connection/swarm_connection.py
+@@ -260,6 +260,8 @@ class SwarmConn(INetConn):
+         net_stream._direction = Direction.INBOUND
+         try:
+             await self.swarm.common_stream_handler(net_stream)
++        except Exception as e:
++            logger.warning(f"Unhandled error handling inbound stream from peer: {e}")
+         finally:
+             # Safety net: ensure stream is removed from connection tracking
+             self.remove_stream(net_stream)
+diff --git a/libp2p/peer/peerdata.py b/libp2p/peer/peerdata.py
+index d74bc2e1..5d02002f 100644
+--- a/libp2p/peer/peerdata.py
++++ b/libp2p/peer/peerdata.py
+@@ -234,6 +234,9 @@ class PeerData(IPeerData):
+         """
+         :return: true, if last_identified+ttl > current_time
+         """
++        # Node's own key pair never expires
++        if self.privkey is not None:
++            return False
+         # for ttl = 0; peer_data is always valid
+         if self.ttl > 0 and self.last_identified + self.ttl < int(time.time()):
+             return True
 diff --git a/libp2p/peer/peerstore.py b/libp2p/peer/peerstore.py
-index 54602937..d26a70fb 100644
+index 54602937..f077b0d0 100644
 --- a/libp2p/peer/peerstore.py
 +++ b/libp2p/peer/peerstore.py
-@@ -335,7 +335,11 @@ class PeerStore(IPeerStore):
+@@ -230,6 +230,8 @@ class PeerStore(IPeerStore):
+         expired_peers = []
+ 
+         for peer_id, peer_data in self.peer_data_map.items():
++            if peer_data.privkey is not None:
++                continue
+             if peer_data.is_expired():
+                 expired_peers.append(peer_id)
+ 
+@@ -335,7 +337,11 @@ class PeerStore(IPeerStore):
          :param peer_id: The peer whose record we may delete/
          """
          if peer_id in self.peer_record_map:
@@ -33,5 +119,3 @@ index 54602937..d26a70fb 100644
                  self.peer_record_map.pop(peer_id, None)
  
      def consume_peer_record(self, envelope: Envelope, ttl: int) -> bool:
--- 
-2.49.0

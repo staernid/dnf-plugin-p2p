@@ -918,6 +918,42 @@ def test_download_from_peer_sends_cluster_token(test_server):
         P2PProxyHandler.expected_hashes.pop("test-pkg.rpm", None)
 
 
+def test_download_from_peer_streaming_large_package(test_server):
+    """Verify that packages larger than streaming_threshold stream directly without full pre-buffering."""
+    server, port, mock_cache, mock_node = test_server
+    mock_cache.get_cached_file_by_name.return_value = None
+
+    import hashlib
+    content = b"large-package-stream-content"
+    pkg_hash = hashlib.sha256(content).hexdigest()
+    pkg_size = 10 * 1024 * 1024  # 10 MB (above 4MB threshold)
+
+    mock_node.query_peers_for_package.return_value = [
+        {"ip": "192.168.1.50", "port": 8888, "hash": pkg_hash, "size": pkg_size}
+    ]
+
+    mock_response = MagicMock()
+    mock_response.status_code = 200
+    mock_response.headers = {"Content-Length": str(len(content))}
+    mock_response.iter_content.return_value = [content]
+
+    from unittest.mock import mock_open
+    try:
+        with patch.object(Path, "exists", return_value=False), \
+             patch.object(Path, "rename"), \
+             patch("requests.get", return_value=mock_response) as mock_get, \
+             patch("builtins.open", mock_open()):
+
+            P2PProxyHandler.expected_hashes["large-pkg.rpm"] = pkg_hash
+            url = f"http://127.0.0.1:{port}/packages/large-pkg.rpm"
+            resp = urllib.request.urlopen(url, timeout=1)
+            assert resp.getcode() == 200
+            assert resp.read() == content
+    finally:
+        P2PProxyHandler.expected_hashes.pop("large-pkg.rpm", None)
+
+
+
 
 
 

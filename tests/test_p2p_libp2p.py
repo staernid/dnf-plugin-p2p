@@ -33,6 +33,21 @@ def test_extract_ip():
     # Should return None if no address is present
     assert extract_ip([]) is None
 
+    # Should prioritize physical LAN over Tailscale CGNAT (100.64.0.0/10)
+    addrs_tailscale = [
+        "/ip4/100.127.150.94/tcp/8000",
+        "/ip4/192.168.1.50/tcp/8000",
+    ]
+    assert extract_ip(addrs_tailscale) == "192.168.1.50"
+
+    # If only Tailscale is present, should pick Tailscale over loopback or docker
+    addrs_tailscale_only = [
+        "/ip4/127.0.0.1/tcp/8000",
+        "/ip4/172.17.0.1/tcp/8000",
+        "/ip4/100.127.150.94/tcp/8000",
+    ]
+    assert extract_ip(addrs_tailscale_only) == "100.127.150.94"
+
 def test_node_init():
     cache_cb = MagicMock(return_value=[])
     node = P2PLibp2pNode(libp2p_port=0, local_http_port=8888, cache_lookup_callback=cache_cb)

@@ -35,8 +35,28 @@ PROTOCOL_ID = TProtocol("/dnf-p2p/query/1.0.0")
 
 def extract_ip(addrs) -> Optional[str]:
     """Extract the best IP address from a list of multiaddrs,
-    prioritizing physical LAN interfaces over virtual/docker bridges.
+    prioritizing physical LAN interfaces over virtual/docker bridges and VPN overlays.
     """
+    local_subnets = []
+    try:
+        import socket, struct
+        with open('/proc/net/route') as f:
+            for line in f.readlines()[1:]:
+                fields = line.strip().split()
+                if len(fields) >= 8:
+                    iface, dest, mask = fields[0], fields[1], fields[7]
+                    if iface.startswith(('lo', 'docker', 'br-', 'virbr', 'tailscale', 'veth')):
+                        continue
+                    dest_ip = int(dest, 16)
+                    mask_ip = int(mask, 16)
+                    if mask_ip > 0:
+                        dest_str = socket.inet_ntoa(struct.pack('<I', dest_ip))
+                        mask_str = socket.inet_ntoa(struct.pack('<I', mask_ip))
+                        net = ipaddress.IPv4Network(f'{dest_str}/{mask_str}', strict=False)
+                        local_subnets.append(net)
+    except Exception:
+        pass
+
     def ip_score(ip: str) -> int:
         if ip in ('127.0.0.1', '::1', '0.0.0.0', '::'):
             return 0
@@ -61,6 +81,15 @@ def extract_ip(addrs) -> Optional[str]:
                 p2 = int(parts[2])
                 if p0 == 192 and p1 == 168 and p2 == 122:
                     return 10
+                # Tailscale / CGNAT range: 100.64.0.0 - 100.127.255.255
+                if p0 == 100 and (64 <= p1 <= 127):
+                    return 20
+
+                # Check if IP belongs to an active local physical subnet
+                addr_obj = ipaddress.IPv4Address(ip)
+                for net in local_subnets:
+                    if addr_obj in net:
+                        return 300
             except ValueError:
                 pass
         return 200
