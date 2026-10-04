@@ -26,7 +26,7 @@ from libp2p.crypto.secp256k1 import create_new_key_pair
 from libp2p.custom_types import TProtocol
 from libp2p.request_response import JSONCodec, RequestResponse
 from libp2p.discovery.events.peerDiscovery import peerDiscovery
-from libp2p.utils.address_validation import find_free_port, get_available_interfaces
+from libp2p.utils.address_validation import find_free_port, get_wildcard_address
 from libp2p.peer.peerinfo import PeerInfo
 
 logger = logging.getLogger("p2p_libp2p")
@@ -225,7 +225,7 @@ class P2PLibp2pNode:
         port = self.libp2p_port
         if port <= 0:
             port = find_free_port()
-        listen_addrs = get_available_interfaces(port)
+        listen_addrs = [get_wildcard_address(port)]
 
         # Generate a stable-enough keypair for this session
         secret = secrets.token_bytes(32)

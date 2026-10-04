@@ -1,7 +1,8 @@
 [Unit]
 Description=DNF P2P Package Sharing Proxy
 Documentation=https://github.com/staernid/dnf-plugin-p2p
-After=network.target
+Wants=network-online.target
+After=network-online.target
 
 [Service]
 Type=simple

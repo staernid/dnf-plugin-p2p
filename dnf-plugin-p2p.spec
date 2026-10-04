@@ -2,7 +2,7 @@
 %{!?dnf_lowest_compatible: %global dnf_lowest_compatible 4.4.3}
 
 Name:           dnf-plugin-p2p
-Version:        0.3.7
+Version:        0.3.8
 Release:        1%{?dist}
 Summary:        Peer-to-peer package sharing plugin for libdnf5
 License:        GPL-2.0-or-later
@@ -168,6 +168,10 @@ fi
 %systemd_postun_with_restart dnf-p2p-proxy.service
 
 %changelog
+* Sun Oct 04 2026 staernid <vitezfh@gmail.com> - 0.3.8-1
+- Bind libp2p listener to wildcard address (0.0.0.0) to handle late interface configuration
+- Ensure systemd proxy service waits for network-online.target
+
 * Fri Oct 02 2026 dnf-plugin-p2p contributors <none@example.com> - 0.3.7-1
 - Fix proxy host binding to 0.0.0.0 and prioritize physical LAN subnets over Tailscale
 - Fix py-libp2p peerstore self-eviction on host key expiration

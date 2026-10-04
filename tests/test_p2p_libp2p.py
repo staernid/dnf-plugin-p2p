@@ -399,3 +399,47 @@ def test_query_peers_and_diagnostic_sends_cluster_token():
     trio.run(run_test)
 
 
+def test_node_uses_wildcard_listener():
+    from unittest.mock import patch, MagicMock
+    import trio
+
+    node = P2PLibp2pNode(libp2p_port=8000, local_http_port=8888, cache_lookup_callback=None)
+
+    mock_host = MagicMock()
+    captured_addrs = []
+
+    class MockRunContext:
+        def __init__(self, listen_addrs):
+            captured_addrs.extend(listen_addrs)
+
+        async def __aenter__(self):
+            return mock_host
+
+        async def __aexit__(self, exc_type, exc_val, exc_tb):
+            pass
+
+    mock_host.run.side_effect = lambda listen_addrs: MockRunContext(listen_addrs)
+    mock_host.get_id().to_string.return_value = "local_peer"
+    mock_host.get_peerstore().peer_ids.return_value = []
+    from unittest.mock import AsyncMock
+    mock_host.get_peerstore().start_cleanup_task = AsyncMock()
+
+    async def run_test():
+        async def cancel_after():
+            await trio.sleep(0.05)
+            nursery.cancel_scope.cancel()
+
+        with patch("p2p_libp2p.new_host", return_value=mock_host), \
+             patch("p2p_libp2p.peerDiscovery"):
+            async with trio.open_nursery() as nursery:
+                nursery.start_soon(cancel_after)
+                await node._async_run()
+
+    trio.run(run_test)
+
+    assert len(captured_addrs) == 1
+    addr_str = str(captured_addrs[0])
+    assert "0.0.0.0" in addr_str
+    assert "8000" in addr_str
+
+
