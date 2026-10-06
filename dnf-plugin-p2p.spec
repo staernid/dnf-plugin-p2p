@@ -2,7 +2,7 @@
 %{!?dnf_lowest_compatible: %global dnf_lowest_compatible 4.4.3}
 
 Name:           dnf-plugin-p2p
-Version:        0.3.8
+Version:        0.3.9
 Release:        1%{?dist}
 Summary:        Peer-to-peer package sharing plugin for libdnf5
 License:        GPL-2.0-or-later
@@ -23,6 +23,7 @@ Source12:       https://files.pythonhosted.org/packages/ce/b6/6fa6b3b598a03cba5e
 # Patches for bundled py-libp2p (applied during %install, not %prep)
 # See patches/0001-fix-peerstore-crash-on-expired-peer-gc.patch for details
 Source10:       0001-fix-peerstore-crash-on-expired-peer-gc.patch
+Source13:       0002-fix-rcmgr-connection-leak-on-handshake-failure.patch
 
 BuildRequires:  cmake >= 3.5.0
 BuildRequires:  python3-sphinx
@@ -122,6 +123,7 @@ python3 -m pip install \
 # Apply patches to bundled py-libp2p after pip install
 pushd %{buildroot}%{_libexecdir}/%{name}
 patch -p1 --no-backup-if-mismatch < %{SOURCE10}
+patch -p1 --no-backup-if-mismatch < %{SOURCE13}
 popd
 
 # Remove demo and entrypoint executables installed by bundled packages into bin/
@@ -168,6 +170,9 @@ fi
 %systemd_postun_with_restart dnf-p2p-proxy.service
 
 %changelog
+* Tue Oct 06 2026 staernid <vitezfh@gmail.com> - 0.3.9-1
+- Release 0.3.9
+
 * Sun Oct 04 2026 staernid <vitezfh@gmail.com> - 0.3.8-1
 - Bind libp2p listener to wildcard address (0.0.0.0) to handle late interface configuration
 - Ensure systemd proxy service waits for network-online.target

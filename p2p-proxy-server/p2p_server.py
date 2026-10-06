@@ -11,6 +11,7 @@ import ipaddress
 import logging
 import os
 import secrets
+import signal
 import socket
 import sys
 import threading
@@ -1187,6 +1188,7 @@ def main():
         cluster_token=cluster_token,
         query_rate_limit=query_rate_limit,
         query_rate_burst=query_rate_burst,
+        key_file=cache_path / "node_key.sec",
     )
     libp2p_node.start()
 
@@ -1196,6 +1198,14 @@ def main():
     P2PProxyHandler.force_https = force_https
     P2PProxyHandler.cluster_token = cluster_token
     
+    server: Optional[ThreadingHTTPServer] = None
+
+    def _sig_handler(signum, frame):
+        sig_name = signal.Signals(signum).name
+        logger.info(f"Received {sig_name}, initiating graceful shutdown...")
+        if server:
+            threading.Thread(target=server.shutdown, daemon=True).start()
+
     # Create HTTP server — prefer systemd-passed socket for socket activation
     try:
         sd_sock = _get_systemd_socket()
@@ -1209,14 +1219,26 @@ def main():
         else:
             server = ThreadingHTTPServer((host, port), P2PProxyHandler)
 
+        try:
+            signal.signal(signal.SIGTERM, _sig_handler)
+            signal.signal(signal.SIGINT, _sig_handler)
+        except ValueError:
+            # Signal handling may fail if not in main thread (e.g. some test runners)
+            pass
+
         logger.info(f"P2P proxy HTTP server listening on http://{host}:{port}")
         server.serve_forever()
     except KeyboardInterrupt:
-        logger.info("Shutting down P2P proxy server")
-        sys.exit(0)
+        logger.info("Interrupted by user")
     except Exception as e:
         logger.error(f"Fatal error in HTTP server: {e}")
         sys.exit(1)
+    finally:
+        logger.info("Cleaning up P2P proxy server and libp2p node...")
+        if server:
+            server.server_close()
+        libp2p_node.stop()
+        logger.info("Shutdown complete")
 
 
 if __name__ == "__main__":

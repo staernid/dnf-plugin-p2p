@@ -245,9 +245,10 @@ def test_diagnostic_check_retry_and_failure():
              patch.object(node, "remove_peer", wraps=node.remove_peer) as mock_remove:
             await node._run_diagnostic_check_async(peerinfo)
             assert mock_get.call_count == 3
-            mock_remove.assert_called_once_with("peer1")
+            mock_remove.assert_called_once_with("peer1", keep_cooldown=True)
             assert "peer1" not in node.discovered_peers
-            assert "peer1" not in node.tested_peers
+            assert "peer1" in node.tested_peers
+            assert "peer1" in node.failed_peers
 
     trio.run(run_test_failure)
 
@@ -441,5 +442,80 @@ def test_node_uses_wildcard_listener():
     addr_str = str(captured_addrs[0])
     assert "0.0.0.0" in addr_str
     assert "8000" in addr_str
+
+
+def test_node_key_persistence(tmp_path):
+    key_path = tmp_path / "node_key.sec"
+    node1 = P2PLibp2pNode(libp2p_port=0, local_http_port=8888, cache_lookup_callback=None, key_file=key_path)
+    key1 = node1._load_or_generate_key()
+    assert key_path.exists()
+    assert len(key1) == 32
+    # Verify file permissions are 0o600
+    assert (key_path.stat().st_mode & 0o777) == 0o600
+
+    node2 = P2PLibp2pNode(libp2p_port=0, local_http_port=8888, cache_lookup_callback=None, key_file=key_path)
+    key2 = node2._load_or_generate_key()
+    assert key1 == key2
+
+
+def test_peer_failure_cooldown(tmp_path):
+    import time
+    from unittest.mock import AsyncMock, patch
+
+    node = P2PLibp2pNode(libp2p_port=0, local_http_port=8888, cache_lookup_callback=None, peer_failure_cooldown=60.0)
+    node.host = MagicMock()
+    node.host.get_id().to_string.return_value = "local_node"
+    peerinfo = MagicMock()
+    peerinfo.peer_id.to_string.return_value = "bad_peer"
+    peerinfo.addrs = ["/ip4/192.168.1.200/tcp/8000"]
+
+    # Mark peer as failed 10 seconds ago
+    node.failed_peers["bad_peer"] = time.time() - 10.0
+
+    # Rediscovery within cooldown should be ignored without running diagnostics
+    with patch.object(node, "_run_diagnostic_check_async", new_callable=AsyncMock) as mock_diag:
+        import trio
+        trio.run(node._on_peer_discovered_async, peerinfo)
+        mock_diag.assert_not_called()
+        assert "bad_peer" not in node.discovered_peers
+
+    # After cooldown expires (simulate past timestamp), discovery should proceed
+    node.failed_peers["bad_peer"] = time.time() - 70.0
+    node.nursery = MagicMock()
+    trio.run(node._on_peer_discovered_async, peerinfo)
+    node.nursery.start_soon.assert_called_once_with(node._run_diagnostic_check_async, peerinfo)
+    assert "bad_peer" in node.discovered_peers
+
+
+def test_node_stop_cleans_up():
+    import trio
+    node = P2PLibp2pNode(libp2p_port=0, local_http_port=8888, cache_lookup_callback=None)
+
+    token_holder = {}
+    cancel_scope_holder = {}
+    ready = threading.Event()
+
+    def run_loop():
+        async def loop():
+            token_holder['token'] = trio.lowlevel.current_trio_token()
+            with trio.CancelScope() as cs:
+                cancel_scope_holder['cs'] = cs
+                node.trio_token = token_holder['token']
+                node._cancel_scope = cs
+                ready.set()
+                await trio.sleep_forever()
+        try:
+            trio.run(loop)
+        except Exception:
+            pass
+
+    t = threading.Thread(target=run_loop, daemon=True)
+    node._thread = t
+    t.start()
+    assert ready.wait(timeout=2.0)
+
+    # Calling stop should cancel the trio scope and join the thread
+    node.stop()
+    assert not t.is_alive()
 
 

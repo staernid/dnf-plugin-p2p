@@ -176,7 +176,8 @@ def test_main_config_loading_and_override():
                 max_parallel_peers=12,
                 cluster_token="my-cluster-token",
                 query_rate_limit=15.0,
-                query_rate_burst=25
+                query_rate_burst=25,
+                key_file=Path("/mock/cache/node_key.sec"),
             )
             assert P2PProxyHandler.cluster_token == "my-cluster-token"
 
@@ -951,6 +952,39 @@ def test_download_from_peer_streaming_large_package(test_server):
             assert resp.read() == content
     finally:
         P2PProxyHandler.expected_hashes.pop("large-pkg.rpm", None)
+
+
+def test_main_graceful_shutdown():
+    from p2p_server import main
+    import signal
+
+    mock_node = MagicMock()
+    mock_server = MagicMock()
+
+    # Capture signal handler registered for SIGTERM
+    captured_handlers = {}
+    def mock_signal(sig, handler):
+        captured_handlers[sig] = handler
+
+    def fake_serve_forever():
+        # Trigger SIGTERM handler while serving
+        if signal.SIGTERM in captured_handlers:
+            captured_handlers[signal.SIGTERM](signal.SIGTERM, None)
+
+    mock_server.serve_forever.side_effect = fake_serve_forever
+
+    with patch("sys.argv", ["p2p_server.py"]), \
+         patch("pathlib.Path.exists", return_value=False), \
+         patch("p2p_server.P2PLibp2pNode", return_value=mock_node), \
+         patch("p2p_server.P2PCache"), \
+         patch("p2p_server.ThreadingHTTPServer", return_value=mock_server), \
+         patch("signal.signal", side_effect=mock_signal):
+
+        main()
+
+        # Check that server_close() and libp2p_node.stop() were called
+        mock_server.server_close.assert_called_once()
+        mock_node.stop.assert_called_once()
 
 
 

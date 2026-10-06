@@ -1,0 +1,28 @@
+diff --git a/libp2p/network/swarm.py b/libp2p/network/swarm.py
+index f28bc0da..53d6ddcd 100644
+--- a/libp2p/network/swarm.py
++++ b/libp2p/network/swarm.py
+@@ -776,6 +776,11 @@ class Swarm(Service, INetworkService):
+                 await raw_conn.close()
+             except Exception:
+                 pass
++            try:
++                if pre_scope is not None and hasattr(pre_scope, "close"):
++                    pre_scope.close()
++            except Exception:
++                pass
+             raise
+ 
+         logger.debug("successfully dialed peer %s", peer_id)
+@@ -800,6 +805,11 @@ class Swarm(Service, INetworkService):
+         except SecurityUpgradeFailure as error:
+             logger.error("failed to upgrade security for peer %s: %s", peer_id, error)
+             await raw_conn.close()
++            try:
++                if pre_scope is not None and hasattr(pre_scope, "close"):
++                    pre_scope.close()
++            except Exception:
++                pass
+             raise SwarmException(
+                 f"failed to upgrade security for peer {peer_id}: {error}"
+             ) from error

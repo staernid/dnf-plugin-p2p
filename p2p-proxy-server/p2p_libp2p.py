@@ -5,7 +5,9 @@ import threading
 import time
 import trio
 import multiaddr
-from typing import Dict, List, Optional, Callable, Set, Any, Tuple
+import os
+from pathlib import Path
+from typing import Dict, List, Optional, Callable, Set, Any, Tuple, Union
 
 # Fallback stub for miniupnpc, which is an optional dependency of py-libp2p
 # but is unconditionally imported by it at startup. Since UPnP is disabled
@@ -163,7 +165,9 @@ class P2PLibp2pNode:
     def __init__(self, libp2p_port: int, local_http_port: int, cache_lookup_callback: Callable[[str], Optional[Dict]],
                  peer_discovery_timeout: float = 2.0, max_parallel_peers: int = 5,
                  cluster_token: Optional[str] = None,
-                 query_rate_limit: float = 20.0, query_rate_burst: int = 30):
+                 query_rate_limit: float = 20.0, query_rate_burst: int = 30,
+                 key_file: Optional[Union[Path, str]] = None,
+                 peer_failure_cooldown: float = 60.0):
         self.libp2p_port = libp2p_port
         self.local_http_port = local_http_port
         self.cache_lookup_callback = cache_lookup_callback
@@ -172,9 +176,13 @@ class P2PLibp2pNode:
         self.cluster_token = cluster_token
         self.query_rate_limit = max(0.1, float(query_rate_limit))
         self.query_rate_burst = max(1, int(query_rate_burst))
+        self.key_file = Path(key_file) if key_file is not None else None
+        self.peer_failure_cooldown = max(1.0, float(peer_failure_cooldown))
         self.rate_limiter = PeerRateLimiter(rate=self.query_rate_limit, burst=self.query_rate_burst)
         self.discovered_peers: Dict[str, PeerInfo] = {}
+        self.failed_peers: Dict[str, float] = {}
         self.trio_token: Optional[trio.lowlevel.TrioToken] = None
+        self._cancel_scope: Optional[trio.CancelScope] = None
         self.host: Any = None
         self.rr: Any = None
         self.codec: Any = None
@@ -184,10 +192,12 @@ class P2PLibp2pNode:
         self._pending_peer_discoveries: List[PeerInfo] = []
         self._pending_lock = threading.Lock()
 
-    def remove_peer(self, peer_id_str: str):
+    def remove_peer(self, peer_id_str: str, keep_cooldown: bool = False):
         """Remove a peer from discovered and tested sets to allow re-testing if rediscovered."""
         self.discovered_peers.pop(peer_id_str, None)
-        self.tested_peers.discard(peer_id_str)
+        if not keep_cooldown:
+            self.tested_peers.discard(peer_id_str)
+            self.failed_peers.pop(peer_id_str, None)
 
     @property
     def num_discovered_peers(self) -> int:
@@ -213,11 +223,45 @@ class P2PLibp2pNode:
             logger.error("Timed out waiting for libp2p node to start")
             raise RuntimeError("Failed to start libp2p node")
 
+    def stop(self):
+        """Stop the libp2p node and clean up background threads and services."""
+        if self._cancel_scope and self.trio_token:
+            try:
+                trio.from_thread.run_sync(
+                    self._cancel_scope.cancel,
+                    trio_token=self.trio_token
+                )
+            except Exception as e:
+                logger.debug(f"Error canceling Trio scope during stop: {e}")
+        if hasattr(self, "_thread") and self._thread.is_alive():
+            self._thread.join(timeout=5.0)
+
     def _run_loop(self):
         try:
             trio.run(self._async_run)
         except Exception as e:
             logger.error(f"Error in libp2p trio run loop: {e}", exc_info=True)
+
+    def _load_or_generate_key(self) -> bytes:
+        """Load persistent key from key_file or generate a new secret."""
+        if self.key_file is not None:
+            try:
+                if self.key_file.exists():
+                    data = self.key_file.read_bytes()
+                    if len(data) == 32:
+                        logger.info(f"Loaded persistent libp2p key from {self.key_file}")
+                        return data
+                    logger.warning(f"Key file {self.key_file} has invalid size ({len(data)} != 32), generating new key")
+                self.key_file.parent.mkdir(parents=True, exist_ok=True)
+                secret = secrets.token_bytes(32)
+                fd = os.open(str(self.key_file), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+                with os.fdopen(fd, "wb") as f:
+                    f.write(secret)
+                logger.info(f"Generated and persisted new libp2p key to {self.key_file}")
+                return secret
+            except Exception as e:
+                logger.warning(f"Could not load or persist node key to {self.key_file}: {e}. Falling back to ephemeral key.")
+        return secrets.token_bytes(32)
 
     async def _async_run(self):
         self.trio_token = trio.lowlevel.current_trio_token()
@@ -227,8 +271,8 @@ class P2PLibp2pNode:
             port = find_free_port()
         listen_addrs = [get_wildcard_address(port)]
 
-        # Generate a stable-enough keypair for this session
-        secret = secrets.token_bytes(32)
+        # Generate or load a stable keypair
+        secret = self._load_or_generate_key()
         key_pair = create_new_key_pair(secret)
 
         # Register the peer discovery event handler
@@ -255,36 +299,38 @@ class P2PLibp2pNode:
 
         self.rr.set_handler(PROTOCOL_ID, handler=self.query_handler, codec=self.codec)
 
-        async with self.host.run(listen_addrs=listen_addrs), trio.open_nursery() as nursery:
-            self.nursery = nursery
-            # Drain any peer discoveries queued before nursery was ready
-            with self._pending_lock:
-                pending = list(self._pending_peer_discoveries)
-                self._pending_peer_discoveries.clear()
-            for p_info in pending:
-                nursery.start_soon(self._on_peer_discovered_async, p_info)
+        with trio.CancelScope() as cancel_scope:
+            self._cancel_scope = cancel_scope
+            async with self.host.run(listen_addrs=listen_addrs), trio.open_nursery() as nursery:
+                self.nursery = nursery
+                # Drain any peer discoveries queued before nursery was ready
+                with self._pending_lock:
+                    pending = list(self._pending_peer_discoveries)
+                    self._pending_peer_discoveries.clear()
+                for p_info in pending:
+                    nursery.start_soon(self._on_peer_discovered_async, p_info)
 
-            # Signal that the node is ready
-            self._started_event.set()
+                # Signal that the node is ready
+                self._started_event.set()
 
-            async def sync_peerstore_peers():
-                while True:
-                    await trio.sleep(2)
-                    try:
-                        peer_ids = self.host.get_peerstore().peer_ids()
-                        for pid in peer_ids:
-                            pid_str = pid.to_string()
-                            if pid_str != self.host.get_id().to_string() and pid_str not in self.discovered_peers:
-                                pinfo = self.host.get_peerstore().peer_info(pid)
-                                if pinfo and pinfo.addrs:
-                                    nursery.start_soon(self._on_peer_discovered_async, pinfo)
-                    except Exception as e:
-                        logger.debug(f"Peerstore sync check error: {e}")
+                async def sync_peerstore_peers():
+                    while True:
+                        await trio.sleep(2)
+                        try:
+                            peer_ids = self.host.get_peerstore().peer_ids()
+                            for pid in peer_ids:
+                                pid_str = pid.to_string()
+                                if pid_str != self.host.get_id().to_string() and pid_str not in self.discovered_peers:
+                                    pinfo = self.host.get_peerstore().peer_info(pid)
+                                    if pinfo and pinfo.addrs:
+                                        nursery.start_soon(self._on_peer_discovered_async, pinfo)
+                        except Exception as e:
+                            logger.debug(f"Peerstore sync check error: {e}")
 
-            nursery.start_soon(sync_peerstore_peers)
-            nursery.start_soon(self.host.get_peerstore().start_cleanup_task, 60)
-            logger.info(f"libp2p node running with PeerID: {self.host.get_id().to_string()}")
-            await trio.sleep_forever()
+                nursery.start_soon(sync_peerstore_peers)
+                nursery.start_soon(self.host.get_peerstore().start_cleanup_task, 60)
+                logger.info(f"libp2p node running with PeerID: {self.host.get_id().to_string()}")
+                await trio.sleep_forever()
 
     async def query_handler(self, request: dict, context) -> dict:
         """Handle incoming libp2p package queries with rate limiting and cluster auth."""
@@ -381,8 +427,9 @@ class P2PLibp2pNode:
                                 )
                     except Exception as e:
                         logger.warning(f"Failed to query peer {peer_id_str}: {e}")
-                        # Remove unresponsive peer
-                        self.remove_peer(peer_id_str)
+                        # Mark peer as failed and put in cooldown
+                        self.failed_peers[peer_id_str] = time.time()
+                        self.remove_peer(peer_id_str, keep_cooldown=True)
 
             with trio.move_on_after(self.peer_discovery_timeout):
                 async with trio.open_nursery() as nursery:
@@ -403,6 +450,19 @@ class P2PLibp2pNode:
         """Handle peer discovery inside the Trio event loop."""
         peer_id_str = peerinfo.peer_id.to_string()
         if peer_id_str != self.host.get_id().to_string():
+            now = time.time()
+            last_fail = self.failed_peers.get(peer_id_str)
+            if last_fail is not None:
+                if now - last_fail < self.peer_failure_cooldown:
+                    logger.debug(
+                        f"Peer {peer_id_str} is in failure cooldown "
+                        f"({int(self.peer_failure_cooldown - (now - last_fail))}s remaining), skipping"
+                    )
+                    return
+                # Cooldown expired, permit re-testing
+                self.failed_peers.pop(peer_id_str, None)
+                self.tested_peers.discard(peer_id_str)
+
             logger.info(f"Discovered peer: {peer_id_str} at {peerinfo.addrs}")
             self.discovered_peers[peer_id_str] = peerinfo
             if peer_id_str not in self.tested_peers:
@@ -493,16 +553,14 @@ class P2PLibp2pNode:
             if last_err:
                 raise last_err
 
+            self.failed_peers.pop(peer_id_str, None)
             logger.info(f"Diagnostic check SUCCESS: successfully transferred diagnostic file from peer {peer_id_str} at {url}")
 
         except Exception as e:
-            logger.critical(
-                "\n"
-                "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!\n"
-                "P2P SYSTEM ERROR: DIAGNOSTIC FILE TRANSFER FAILED between hosts!\n"
-                f"Failed to fetch diagnostic file from peer {peer_id_str} at {url or 'unknown URL'}.\n"
-                f"Error details: {e}\n"
-                "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"
+            self.failed_peers[peer_id_str] = time.time()
+            logger.warning(
+                f"P2P diagnostic check failed for peer {peer_id_str} at {url or 'unknown URL'}: {e}. "
+                f"Peer set to {int(self.peer_failure_cooldown)}s failure cooldown."
             )
-            # Remove peer from discovered list so it can be re-discovered/re-tested
-            self.remove_peer(peer_id_str)
+            # Remove peer from discovered list so it won't be queried, but retain in tested_peers for cooldown
+            self.remove_peer(peer_id_str, keep_cooldown=True)
